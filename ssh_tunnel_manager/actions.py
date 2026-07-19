@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import os
 import shlex
 import socket
 import subprocess
 
-from .models import AppSettings, HostConfig
+from .models import AppSettings, HostConfig, find_vscode_path
 
 
 @dataclass
@@ -141,8 +143,23 @@ printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
         )
 
     def launch_vscode(self, host: HostConfig) -> None:
+        executable = self.settings.vscode_path or find_vscode_path()
+        if not executable:
+            raise FileNotFoundError("未找到 VSCode。请在“设置 → VSCode 程序”中选择 Code.exe。")
+        path = Path(executable)
+        if not path.is_file():
+            executable = find_vscode_path()
+            path = Path(executable) if executable else path
+        if not path.is_file():
+            raise FileNotFoundError(f"VSCode 路径不存在：{path}。请在设置中重新选择。")
+        self.settings.vscode_path = str(path)
+        arguments = ["--remote", f"ssh-remote+{host.alias}", host.remote_dir]
+        if path.suffix.lower() in {".cmd", ".bat"}:
+            command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(path), *arguments]
+        else:
+            command = [str(path), *arguments]
         subprocess.Popen(
-            ["code", "--remote", f"ssh-remote+{host.alias}", host.remote_dir],
+            command,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 

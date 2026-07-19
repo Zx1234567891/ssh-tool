@@ -79,6 +79,7 @@ class SettingsDialog(QDialog):
         form.setSpacing(12)
         ssh_holder, self.ssh_path = self._file_row(settings.ssh_path, "选择 ssh.exe")
         config_holder, self.config_path = self._file_row(settings.ssh_config_path, "选择 SSH config")
+        vscode_holder, self.vscode_path = self._file_row(settings.vscode_path, "选择 Code.exe 或 code.cmd")
         self.local_host = QLineEdit(settings.local_proxy_host)
         self.local_port = self._spin(settings.local_proxy_port, 1, 65535)
         self.default_remote_port = self._spin(settings.default_remote_proxy_port, 1024, 65535)
@@ -89,6 +90,7 @@ class SettingsDialog(QDialog):
         self.minimize_tray.setChecked(settings.minimize_to_tray)
         form.addRow("SSH 程序", ssh_holder)
         form.addRow("SSH 配置", config_holder)
+        form.addRow("VSCode 程序", vscode_holder)
         form.addRow("本地代理地址", self.local_host)
         form.addRow("本地代理端口", self.local_port)
         form.addRow("新主机默认远程端口", self.default_remote_port)
@@ -128,6 +130,7 @@ class SettingsDialog(QDialog):
     def apply_to(self, settings: AppSettings) -> None:
         settings.ssh_path = self.ssh_path.text().strip()
         settings.ssh_config_path = self.config_path.text().strip()
+        settings.vscode_path = self.vscode_path.text().strip()
         settings.local_proxy_host = self.local_host.text().strip()
         settings.local_proxy_port = self.local_port.value()
         settings.default_remote_proxy_port = self.default_remote_port.value()

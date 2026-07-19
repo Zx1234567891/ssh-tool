@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import os
+import shutil
 
 
 def default_ssh_path() -> str:
@@ -15,10 +16,40 @@ def default_ssh_config_path() -> str:
     return str(Path.home() / ".ssh" / "config")
 
 
+def find_vscode_path() -> str:
+    """Locate Code.exe even when only code.cmd is exposed on PATH."""
+    candidates: list[Path] = []
+    command = shutil.which("code") or shutil.which("code.cmd")
+    if command:
+        command_path = Path(command)
+        candidates.append(command_path)
+        if command_path.suffix.lower() in {".cmd", ".bat"} and command_path.parent.name.lower() == "bin":
+            candidates.insert(0, command_path.parent.parent / "Code.exe")
+
+    local = os.environ.get("LOCALAPPDATA")
+    program_files = os.environ.get("ProgramFiles")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if local:
+        candidates.extend([
+            Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe",
+            Path(local) / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe",
+        ])
+    if program_files:
+        candidates.append(Path(program_files) / "Microsoft VS Code" / "Code.exe")
+    if program_files_x86:
+        candidates.append(Path(program_files_x86) / "Microsoft VS Code" / "Code.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 @dataclass(slots=True)
 class AppSettings:
     ssh_path: str = field(default_factory=default_ssh_path)
     ssh_config_path: str = field(default_factory=default_ssh_config_path)
+    vscode_path: str = field(default_factory=find_vscode_path)
     local_proxy_host: str = "127.0.0.1"
     local_proxy_port: int = 7892
     default_remote_proxy_port: int = 10099
