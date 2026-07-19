@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.gui-test-data/
+build/
+build-next/
+dist/
+dist-next/
+*.spec
+.idea/
+.vscode/
+Thumbs.db

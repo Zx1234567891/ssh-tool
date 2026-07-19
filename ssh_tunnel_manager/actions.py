@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import shlex
+import socket
+import subprocess
+
+from .models import AppSettings, HostConfig
+
+
+@dataclass
+class ActionResult:
+    ok: bool
+    title: str
+    detail: str
+
+
+class HostActions:
+    def __init__(self, settings_provider) -> None:
+        self._settings_provider = settings_provider
+
+    @property
+    def settings(self) -> AppSettings:
+        return self._settings_provider()
+
+    def _ssh(self, alias: str, remote_command: str | None = None) -> list[str]:
+        settings = self.settings
+        command = [
+            settings.ssh_path, "-F", settings.ssh_config_path,
+            "-o", "ClearAllForwardings=yes",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={settings.connect_timeout}",
+            alias,
+        ]
+        if remote_command:
+            command.append(remote_command)
+        return command
+
+    @staticmethod
+    def _run(command: list[str], timeout: int, input_text: str | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            command, input=input_text, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def test_local_proxy(self) -> ActionResult:
+        settings = self.settings
+        try:
+            with socket.create_connection(
+                (settings.local_proxy_host, settings.local_proxy_port), timeout=3
+            ):
+                return ActionResult(True, "本地代理正常", f"{settings.local_proxy_host}:{settings.local_proxy_port} 可以连接")
+        except OSError as exc:
+            return ActionResult(False, "本地代理不可用", str(exc))
+
+    def test_ssh(self, host: HostConfig) -> ActionResult:
+        try:
+            result = self._run(self._ssh(host.alias, "printf SSH_OK"), self.settings.connect_timeout + 5)
+        except Exception as exc:
+            return ActionResult(False, "SSH 测试失败", str(exc))
+        ok = result.returncode == 0 and "SSH_OK" in result.stdout
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
+        return ActionResult(ok, "SSH 连接正常" if ok else "SSH 测试失败", detail)
+
+    def test_remote_proxy(self, host: HostConfig) -> ActionResult:
+        port = host.remote_proxy_port
+        url = shlex.quote(self.settings.proxy_test_url)
+        remote = (
+            f"curl -sSIL --max-time 20 -x http://127.0.0.1:{port} {url} "
+            "| sed -n '1p'"
+        )
+        try:
+            result = self._run(self._ssh(host.alias, remote), 28)
+        except Exception as exc:
+            return ActionResult(False, "远程代理测试失败", str(exc))
+        first_line = result.stdout.strip().splitlines()[:1]
+        detail = first_line[0] if first_line else result.stderr.strip()
+        ok = result.returncode == 0 and detail.startswith("HTTP/")
+        return ActionResult(ok, "远程代理正常" if ok else "远程代理测试失败", detail)
+
+    def configure_remote_shell(self, host: HostConfig) -> ActionResult:
+        port = host.remote_proxy_port
+        script = f'''set -eu
+file="$HOME/.bashrc"
+touch "$file"
+stamp=$(date +%Y%m%d-%H%M%S)
+cp "$file" "$file.ssh-tunnel-manager-backup-$stamp"
+tmp=$(mktemp)
+awk 'BEGIN {{skip=0}} $0=="# >>> SSH Tunnel Manager >>>" {{skip=1;next}} $0=="# <<< SSH Tunnel Manager <<<" {{skip=0;next}} !skip {{print}}' "$file" > "$tmp"
+cat >> "$tmp" <<'EOF'
+# >>> SSH Tunnel Manager >>>
+export http_proxy=http://127.0.0.1:{port}
+export https_proxy=http://127.0.0.1:{port}
+export HTTP_PROXY=http://127.0.0.1:{port}
+export HTTPS_PROXY=http://127.0.0.1:{port}
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy=localhost,127.0.0.1,::1
+# <<< SSH Tunnel Manager <<<
+EOF
+mv "$tmp" "$file"
+printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
+'''
+        try:
+            command = self._ssh(host.alias)
+            command.append("bash -s")
+            result = self._run(command, 20, script)
+        except Exception as exc:
+            return ActionResult(False, "配置失败", str(exc))
+        ok = result.returncode == 0 and "CONFIG_OK" in result.stdout
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
+        return ActionResult(ok, "远程环境已配置" if ok else "配置失败", detail)
+
+    def smoke_codex(self, host: HostConfig) -> ActionResult:
+        timeout = self.settings.smoke_timeout
+        port = host.remote_proxy_port
+        inner = (
+            f"export http_proxy=http://127.0.0.1:{port} https_proxy=http://127.0.0.1:{port} "
+            f"HTTP_PROXY=http://127.0.0.1:{port} HTTPS_PROXY=http://127.0.0.1:{port}; "
+            f"timeout {timeout}s codex exec --skip-git-repo-check -"
+        )
+        # Conda/npm-installed Codex is often added to PATH by interactive shell setup.
+        remote = "bash -lic " + shlex.quote(inner)
+        try:
+            result = self._run(
+                self._ssh(host.alias, remote), timeout + 12,
+                "Reply exactly: CODEX_SMOKE_OK\n",
+            )
+        except Exception as exc:
+            return ActionResult(False, "Codex 冒烟测试失败", str(exc))
+        combined = (result.stdout + "\n" + result.stderr).strip()
+        ok = result.returncode == 0 and "CODEX_SMOKE_OK" in combined
+        tail = "\n".join(combined.splitlines()[-8:])
+        return ActionResult(ok, "Codex 测试通过" if ok else "Codex 冒烟测试失败", tail)
+
+    def launch_terminal(self, host: HostConfig) -> None:
+        subprocess.Popen(
+            [self.settings.ssh_path, "-F", self.settings.ssh_config_path,
+             "-o", "ClearAllForwardings=yes", host.alias],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+
+    def launch_vscode(self, host: HostConfig) -> None:
+        subprocess.Popen(
+            ["code", "--remote", f"ssh-remote+{host.alias}", host.remote_dir],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def launch_codex(self, host: HostConfig) -> None:
+        subprocess.Popen(
+            [self.settings.ssh_path, "-F", self.settings.ssh_config_path,
+             "-o", "ClearAllForwardings=yes", "-t", host.alias, "bash -lic codex"],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
