@@ -5,6 +5,8 @@ build/
 build-next/
 dist/
 dist-next/
+build-*/
+dist-*/
 *.spec
 .idea/
 .vscode/

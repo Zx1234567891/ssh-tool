@@ -397,6 +397,11 @@ class MainWindow(QMainWindow):
                 self.append_log(f"已将 Host {entry.alias} 写入 SSH config{backup_text}")
             self.state.hosts.append(host)
             self.store.save(self.state)
+            try:
+                proxy_config = self.actions.configure_local_ssh_proxy(host)
+                self.append_log(f"已为 {host.alias} 保存本机代理端口：{proxy_config}")
+            except Exception as exc:
+                QMessageBox.warning(self, "代理端口配置失败", str(exc))
             self.refresh_hosts(host.alias)
 
     def edit_host(self) -> None:
@@ -414,6 +419,11 @@ class MainWindow(QMainWindow):
             index = self.state.hosts.index(host)
             self.state.hosts[index] = updated
             self.store.save(self.state)
+            try:
+                proxy_config = self.actions.configure_local_ssh_proxy(updated)
+                self.append_log(f"已为 {updated.alias} 更新本机代理端口：{proxy_config}")
+            except Exception as exc:
+                QMessageBox.warning(self, "代理端口配置失败", str(exc))
             self.refresh_hosts(updated.alias)
 
     def remove_host(self) -> None:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,7 +10,9 @@ from ssh_tunnel_manager.actions import HostActions
 from ssh_tunnel_manager.models import (
     AppState, HostConfig, connected_hosts_first, find_vscode_path,
 )
-from ssh_tunnel_manager.ssh_config import SshHostEntry, append_host_entry, parse_host_aliases
+from ssh_tunnel_manager.ssh_config import (
+    SshHostEntry, append_host_entry, parse_host_aliases, upsert_proxy_setenv,
+)
 from ssh_tunnel_manager.store import StateStore
 from ssh_tunnel_manager.tunnel import TunnelManager
 
@@ -94,6 +94,23 @@ class SshConfigTests(unittest.TestCase):
                     str(path), SshHostEntry(alias="existing", hostname="10.0.0.2", user="demo")
                 )
 
+    def test_proxy_ports_are_upserted_in_one_local_include(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config"
+            path.write_text("Host server-a\n  HostName 10.0.0.1\n", encoding="utf-8")
+            include_path = upsert_proxy_setenv(str(path), "server-a", 10099)
+            upsert_proxy_setenv(str(path), "server-b", 10098)
+            upsert_proxy_setenv(str(path), "server-a", 10097)
+
+            main = path.read_text(encoding="utf-8")
+            generated = include_path.read_text(encoding="utf-8")
+            self.assertEqual(main.count("Include "), 1)
+            self.assertEqual(generated.count("Host server-a"), 1)
+            self.assertIn("SetEnv LC_STM_PROXY_PORT=10097", generated)
+            self.assertIn("SetEnv LC_STM_PROXY_PORT=10098", generated)
+            self.assertNotIn("LC_STM_PROXY_PORT=10099", generated)
+            self.assertTrue(generated.rstrip().endswith("Host *"))
+
 
 class TunnelCommandTests(unittest.TestCase):
     def test_dedicated_forward_contains_required_options(self) -> None:
@@ -130,7 +147,7 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("200 Connection established", result.detail)
 
-    def test_vscode_launch_uses_per_host_proxy_profile(self) -> None:
+    def test_vscode_launch_reuses_default_profile_and_syncs_ssh_port(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             fake_code = Path(folder) / "Code.exe"
             fake_code.write_bytes(b"not-executed")
@@ -141,45 +158,16 @@ class ActionTests(unittest.TestCase):
                 alias="server-a", remote_dir="/workspace", remote_proxy_port=11099
             )
             with (
-                patch.dict(os.environ, {"LOCALAPPDATA": folder}),
+                patch.object(actions, "configure_local_ssh_proxy") as configure,
                 patch("ssh_tunnel_manager.actions.subprocess.Popen") as popen,
             ):
                 actions.launch_vscode(host)
             command = popen.call_args.args[0]
             self.assertEqual(command[0], str(fake_code))
-            self.assertIn("--user-data-dir", command)
+            self.assertNotIn("--user-data-dir", command)
             self.assertIn("--new-window", command)
             self.assertEqual(command[-3:], ["--remote", "ssh-remote+server-a", "/workspace"])
-            profile = Path(command[command.index("--user-data-dir") + 1])
-            settings = json.loads((profile / "User" / "settings.json").read_text(encoding="utf-8"))
-            environment = settings["terminal.integrated.env.linux"]
-            self.assertEqual(environment["http_proxy"], "http://127.0.0.1:11099")
-            self.assertEqual(environment["HTTPS_PROXY"], "http://127.0.0.1:11099")
-
-    def test_vscode_profiles_are_local_and_host_specific(self) -> None:
-        state = AppState()
-        actions = HostActions(lambda: state.settings)
-        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            host = HostConfig(alias="shared-user-host", remote_proxy_port=10099)
-            with patch.dict(os.environ, {"LOCALAPPDATA": first}):
-                first_profile = actions.configure_vscode_profile(host)
-            host.remote_proxy_port = 10098
-            with patch.dict(os.environ, {"LOCALAPPDATA": second}):
-                second_profile = actions.configure_vscode_profile(host)
-            first_settings = json.loads(
-                (first_profile / "User" / "settings.json").read_text(encoding="utf-8")
-            )
-            second_settings = json.loads(
-                (second_profile / "User" / "settings.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                first_settings["terminal.integrated.env.linux"]["http_proxy"],
-                "http://127.0.0.1:10099",
-            )
-            self.assertEqual(
-                second_settings["terminal.integrated.env.linux"]["http_proxy"],
-                "http://127.0.0.1:10098",
-            )
+            configure.assert_called_once_with(host)
 
     def test_remote_shell_installs_selector_without_fixed_port(self) -> None:
         state = AppState()
@@ -196,6 +184,8 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("stm_proxy_use", script)
         self.assertIn("stm_proxy_off", script)
+        self.assertIn("LC_STM_PROXY_PORT", script)
+        self.assertIn('stm_proxy_use "$LC_STM_PROXY_PORT"', script)
         self.assertNotIn("10099", script)
         self.assertIn("localhost|127[.]0[.]0[.]1", script)
         self.assertEqual(command[-1], "tr -d '\\015' | bash -s")

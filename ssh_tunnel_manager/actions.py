@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import hashlib
 import json
 import os
-import re
 import shlex
 import socket
 import subprocess
-import tempfile
 
 from .models import AppSettings, HostConfig, find_vscode_path
+from .ssh_config import upsert_proxy_setenv
 
 
 @dataclass
@@ -68,50 +66,10 @@ class HostActions:
             for key, value in cls._proxy_environment(port).items()
         )
 
-    @staticmethod
-    def _vscode_profile_root(host: HostConfig) -> Path:
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        root = Path(base) if base else Path.home() / ".ssh-tunnel-manager"
-        safe_alias = re.sub(r"[^A-Za-z0-9._-]+", "-", host.alias).strip("-.") or "host"
-        suffix = hashlib.sha256(host.alias.encode("utf-8")).hexdigest()[:8]
-        return root / "SshTunnelManager" / "vscode-profiles" / f"{safe_alias}-{suffix}"
-
-    def configure_vscode_profile(self, host: HostConfig) -> Path:
-        """Create a local per-host profile used by every new remote terminal."""
-        root = self._vscode_profile_root(host)
-        settings_path = root / "User" / "settings.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict = {}
-        if settings_path.exists():
-            try:
-                loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    payload = loaded
-            except (OSError, json.JSONDecodeError):
-                backup = settings_path.with_suffix(".json.invalid-backup")
-                try:
-                    backup.write_bytes(settings_path.read_bytes())
-                except OSError:
-                    pass
-
-        terminal_environment = payload.get("terminal.integrated.env.linux")
-        if not isinstance(terminal_environment, dict):
-            terminal_environment = {}
-        terminal_environment.update(self._proxy_environment(host.remote_proxy_port))
-        payload["terminal.integrated.env.linux"] = terminal_environment
-
-        fd, temporary_name = tempfile.mkstemp(
-            prefix="settings-", suffix=".tmp", dir=settings_path.parent
+    def configure_local_ssh_proxy(self, host: HostConfig) -> Path:
+        return upsert_proxy_setenv(
+            self.settings.ssh_config_path, host.alias, host.remote_proxy_port
         )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-            os.replace(temporary_name, settings_path)
-        finally:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
-        return root
 
     @staticmethod
     def _run(command: list[str], timeout: int, input_text: str | None = None) -> subprocess.CompletedProcess:
@@ -261,6 +219,10 @@ stm_proxy_off() {
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
     printf '代理已关闭\n'
 }
+
+if [ -n "${LC_STM_PROXY_PORT:-}" ]; then
+    stm_proxy_use "$LC_STM_PROXY_PORT" >/dev/null
+fi
 # <<< SSH Tunnel Manager <<<
 EOF
 mv "$tmp" "$file"
@@ -320,9 +282,9 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
         if not path.is_file():
             raise FileNotFoundError(f"VSCode 路径不存在：{path}。请在设置中重新选择。")
         self.settings.vscode_path = str(path)
-        profile_root = self.configure_vscode_profile(host)
+        self.configure_local_ssh_proxy(host)
         arguments = [
-            "--user-data-dir", str(profile_root), "--new-window",
+            "--new-window",
             "--remote", f"ssh-remote+{host.alias}", host.remote_dir,
         ]
         if path.suffix.lower() in {".cmd", ".bat"}:
