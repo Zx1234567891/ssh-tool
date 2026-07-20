@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
+import tempfile
 
 from .models import AppSettings, HostConfig, find_vscode_path
 
@@ -45,6 +48,70 @@ class HostActions:
         if remote_command:
             command.append(remote_command)
         return command
+
+    @staticmethod
+    def _proxy_environment(port: int) -> dict[str, str]:
+        proxy = f"http://127.0.0.1:{port}"
+        return {
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "NO_PROXY": "localhost,127.0.0.1,::1",
+            "no_proxy": "localhost,127.0.0.1,::1",
+        }
+
+    @classmethod
+    def _remote_proxy_exports(cls, port: int) -> str:
+        return " ".join(
+            f"{key}={shlex.quote(value)}"
+            for key, value in cls._proxy_environment(port).items()
+        )
+
+    @staticmethod
+    def _vscode_profile_root(host: HostConfig) -> Path:
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else Path.home() / ".ssh-tunnel-manager"
+        safe_alias = re.sub(r"[^A-Za-z0-9._-]+", "-", host.alias).strip("-.") or "host"
+        suffix = hashlib.sha256(host.alias.encode("utf-8")).hexdigest()[:8]
+        return root / "SshTunnelManager" / "vscode-profiles" / f"{safe_alias}-{suffix}"
+
+    def configure_vscode_profile(self, host: HostConfig) -> Path:
+        """Create a local per-host profile used by every new remote terminal."""
+        root = self._vscode_profile_root(host)
+        settings_path = root / "User" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict = {}
+        if settings_path.exists():
+            try:
+                loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+            except (OSError, json.JSONDecodeError):
+                backup = settings_path.with_suffix(".json.invalid-backup")
+                try:
+                    backup.write_bytes(settings_path.read_bytes())
+                except OSError:
+                    pass
+
+        terminal_environment = payload.get("terminal.integrated.env.linux")
+        if not isinstance(terminal_environment, dict):
+            terminal_environment = {}
+        terminal_environment.update(self._proxy_environment(host.remote_proxy_port))
+        payload["terminal.integrated.env.linux"] = terminal_environment
+
+        fd, temporary_name = tempfile.mkstemp(
+            prefix="settings-", suffix=".tmp", dir=settings_path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary_name, settings_path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+        return root
 
     @staticmethod
     def _run(command: list[str], timeout: int, input_text: str | None = None) -> subprocess.CompletedProcess:
@@ -161,36 +228,48 @@ print(json.dumps({
             raise RuntimeError(f"远程目录响应格式无效：{result.stdout.strip()}") from exc
 
     def configure_remote_shell(self, host: HostConfig) -> ActionResult:
-        port = host.remote_proxy_port
-        script = f'''set -eu
+        script = r'''set -eu
 file="$HOME/.bashrc"
 touch "$file"
 stamp=$(date +%Y%m%d-%H%M%S)
 cp "$file" "$file.ssh-tunnel-manager-backup-$stamp"
 tmp=$(mktemp)
-awk 'BEGIN {{skip=0}} $0=="# >>> SSH Tunnel Manager >>>" {{skip=1;next}} $0=="# <<< SSH Tunnel Manager <<<" {{skip=0;next}} !skip {{print}}' "$file" > "$tmp"
+awk 'BEGIN {skip=0} $0=="# >>> SSH Tunnel Manager >>>" {skip=1;next} $0=="# <<< SSH Tunnel Manager <<<" {skip=0;next} !skip {print}' "$file" > "$tmp"
 cat >> "$tmp" <<'EOF'
 # >>> SSH Tunnel Manager >>>
-export http_proxy=http://127.0.0.1:{port}
-export https_proxy=http://127.0.0.1:{port}
-export HTTP_PROXY=http://127.0.0.1:{port}
-export HTTPS_PROXY=http://127.0.0.1:{port}
-export NO_PROXY=localhost,127.0.0.1,::1
-export no_proxy=localhost,127.0.0.1,::1
+stm_proxy_use() {
+    case "$1" in
+        ''|*[!0-9]*) echo "用法: stm_proxy_use <端口>" >&2; return 2 ;;
+    esac
+    export http_proxy="http://127.0.0.1:$1"
+    export https_proxy="$http_proxy"
+    export HTTP_PROXY="$http_proxy"
+    export HTTPS_PROXY="$http_proxy"
+    export NO_PROXY="localhost,127.0.0.1,::1"
+    export no_proxy="$NO_PROXY"
+    printf '代理已切换为 %s\n' "$http_proxy"
+}
+
+stm_proxy_off() {
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
+    printf '代理已关闭\n'
+}
 # <<< SSH Tunnel Manager <<<
 EOF
 mv "$tmp" "$file"
-printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
+printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
 '''
         try:
             command = self._ssh(host.alias)
-            command.append("bash -s")
+            # Windows pipes can turn LF into CRLF (or CRCRLF through some
+            # OpenSSH builds). Strip CR before Bash parses variable values.
+            command.append("tr -d '\\015' | bash -s")
             result = self._run(command, 20, script)
         except Exception as exc:
             return ActionResult(False, "配置失败", str(exc))
         ok = result.returncode == 0 and "CONFIG_OK" in result.stdout
         detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
-        return ActionResult(ok, "远程环境已配置" if ok else "配置失败", detail)
+        return ActionResult(ok, "远程代理切换器已安装" if ok else "配置失败", detail)
 
     def smoke_codex(self, host: HostConfig) -> ActionResult:
         timeout = self.settings.smoke_timeout
@@ -215,9 +294,11 @@ printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
         return ActionResult(ok, "Codex 测试通过" if ok else "Codex 冒烟测试失败", tail)
 
     def launch_terminal(self, host: HostConfig) -> None:
+        exports = self._remote_proxy_exports(host.remote_proxy_port)
+        remote = f"export {exports}; exec bash -l"
         subprocess.Popen(
             [self.settings.ssh_path, "-F", self.settings.ssh_config_path,
-             "-o", "ClearAllForwardings=yes", host.alias],
+             "-o", "ClearAllForwardings=yes", "-t", host.alias, remote],
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
 
@@ -232,7 +313,11 @@ printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
         if not path.is_file():
             raise FileNotFoundError(f"VSCode 路径不存在：{path}。请在设置中重新选择。")
         self.settings.vscode_path = str(path)
-        arguments = ["--remote", f"ssh-remote+{host.alias}", host.remote_dir]
+        profile_root = self.configure_vscode_profile(host)
+        arguments = [
+            "--user-data-dir", str(profile_root), "--new-window",
+            "--remote", f"ssh-remote+{host.alias}", host.remote_dir,
+        ]
         if path.suffix.lower() in {".cmd", ".bat"}:
             command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(path), *arguments]
         else:
@@ -243,8 +328,10 @@ printf 'CONFIG_OK backup=%s\\n' "$file.ssh-tunnel-manager-backup-$stamp"
         )
 
     def launch_codex(self, host: HostConfig) -> None:
+        exports = self._remote_proxy_exports(host.remote_proxy_port)
+        remote = "bash -lic " + shlex.quote(f"export {exports}; exec codex")
         subprocess.Popen(
             [self.settings.ssh_path, "-F", self.settings.ssh_config_path,
-             "-o", "ClearAllForwardings=yes", "-t", host.alias, "bash -lic codex"],
+             "-o", "ClearAllForwardings=yes", "-t", host.alias, remote],
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )

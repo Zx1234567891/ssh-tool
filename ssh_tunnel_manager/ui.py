@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         tests = QHBoxLayout()
         for text, callback in [
             ("测试本地代理", self.test_local), ("测试 SSH", self.test_ssh),
-            ("测试远程代理", self.test_remote), ("配置远程环境", self.configure_remote),
+            ("测试远程代理", self.test_remote), ("安装代理切换器", self.configure_remote),
             ("Codex 冒烟测试", self.smoke_codex),
         ]:
             button = QPushButton(text)
@@ -463,9 +463,13 @@ class MainWindow(QMainWindow):
         host = self.selected_host()
         if not host:
             return
-        answer = QMessageBox.question(self, "配置远程环境", "将备份远程 ~/.bashrc，并写入由本软件管理的代理变量。是否继续？")
+        answer = QMessageBox.question(
+            self, "安装代理切换器",
+            "将备份远程 ~/.bashrc，移除旧的固定代理端口，并安装 stm_proxy_use/stm_proxy_off 命令。\n"
+            "从软件打开 SSH、VSCode 或 Codex 时会自动选择本机对应端口。是否继续？",
+        )
         if answer == QMessageBox.StandardButton.Yes:
-            self._action("配置远程环境", lambda: self.actions.configure_remote_shell(host))
+            self._action("安装代理切换器", lambda: self.actions.configure_remote_shell(host))
 
     def smoke_codex(self) -> None:
         host = self.selected_host()
@@ -504,7 +508,10 @@ class MainWindow(QMainWindow):
         self.store.save(self.state)
         try:
             self.actions.launch_vscode(replace(host, remote_dir=workspace))
-            self.append_log(f"已用 VSCode 打开 {host.alias}:{workspace}")
+            self.append_log(
+                f"已用 VSCode 打开 {host.alias}:{workspace}；新终端固定使用远程端口 "
+                f"{host.remote_proxy_port}"
+            )
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", str(exc))
 
