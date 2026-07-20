@@ -91,6 +91,30 @@ class TunnelCommandTests(unittest.TestCase):
 
 
 class ActionTests(unittest.TestCase):
+    def test_local_proxy_requires_real_http_connect(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        failed = subprocess.CompletedProcess(
+            args=[], returncode=56, stdout="", stderr="Proxy CONNECT aborted"
+        )
+        with patch.object(actions, "_run", return_value=failed):
+            result = actions.test_local_proxy()
+        self.assertFalse(result.ok)
+        self.assertIn("Proxy CONNECT aborted", result.detail)
+
+    def test_local_proxy_accepts_connect_before_windows_tls_error(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        connected = subprocess.CompletedProcess(
+            args=[], returncode=35,
+            stdout="HTTP/1.1 200 Connection established\n",
+            stderr="schannel: SEC_E_NO_CREDENTIALS",
+        )
+        with patch.object(actions, "_run", return_value=connected):
+            result = actions.test_local_proxy()
+        self.assertTrue(result.ok)
+        self.assertIn("200 Connection established", result.detail)
+
     def test_vscode_launch_uses_configured_executable(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             fake_code = Path(folder) / "Code.exe"

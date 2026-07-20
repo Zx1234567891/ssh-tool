@@ -56,13 +56,41 @@ class HostActions:
 
     def test_local_proxy(self) -> ActionResult:
         settings = self.settings
+        proxy = f"http://{settings.local_proxy_host}:{settings.local_proxy_port}"
         try:
-            with socket.create_connection(
-                (settings.local_proxy_host, settings.local_proxy_port), timeout=3
-            ):
-                return ActionResult(True, "本地代理正常", f"{settings.local_proxy_host}:{settings.local_proxy_port} 可以连接")
-        except OSError as exc:
-            return ActionResult(False, "本地代理不可用", str(exc))
+            result = self._run(
+                [
+                    "curl.exe", "-sSIL", "--max-time", "12",
+                    "-x", proxy, settings.proxy_test_url,
+                ],
+                16,
+            )
+        except FileNotFoundError:
+            try:
+                with socket.create_connection(
+                    (settings.local_proxy_host, settings.local_proxy_port), timeout=3
+                ):
+                    return ActionResult(
+                        True, "本地代理端口可连接",
+                        f"{settings.local_proxy_host}:{settings.local_proxy_port}（系统无 curl，未验证 HTTPS）",
+                    )
+            except OSError as exc:
+                return ActionResult(False, "本地代理不可用", str(exc))
+        except Exception as exc:
+            return ActionResult(False, "本地代理测试失败", str(exc))
+        http_lines = [line.strip() for line in result.stdout.splitlines() if line.startswith("HTTP/")]
+        connect_line = next(
+            (line for line in http_lines if " 200 " in line and "Connection established" in line),
+            "",
+        )
+        # A successful CONNECT proves the HTTP proxy accepted and forwarded the
+        # tunnel.  Windows Schannel can still fail afterwards when the current
+        # process has no usable TLS credentials; that is not a proxy failure.
+        ok = bool(connect_line) or (result.returncode == 0 and bool(http_lines))
+        detail = (connect_line or http_lines[0]) if ok else (
+            result.stderr.strip() or result.stdout.strip() or f"curl 退出码 {result.returncode}"
+        )
+        return ActionResult(ok, "本地代理正常" if ok else "本地代理不可用", detail)
 
     def test_ssh(self, host: HostConfig) -> ActionResult:
         try:
