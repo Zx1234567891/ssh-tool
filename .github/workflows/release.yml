@@ -34,11 +34,8 @@ jobs:
         run: .\build.ps1
 
       - name: Publish GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          "dist/SshTunnelManager.exe#SSH Tunnel Manager for Windows"
-          --title "SSH Tunnel Manager $GITHUB_REF_NAME"
-          --generate-notes
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
+        with:
+          files: dist/SshTunnelManager.exe
+          generate_release_notes: true
+          name: SSH Tunnel Manager ${{ github.ref_name }}
