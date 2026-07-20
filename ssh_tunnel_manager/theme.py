@@ -17,6 +17,9 @@ QPushButton#primary { color: white; background: #07c160; border: 1px solid #07c1
 QPushButton#primary:hover { background: #06ad56; }
 QPushButton#danger { color: #d64545; background: #fff; border-color: #f0caca; }
 QPushButton#ghost { background: transparent; border: none; padding: 6px; color: #6d747d; }
+QPushButton#settingsButton { background: #ffffff; border: 1px solid #d9dde3; border-radius: 8px; padding: 7px 11px; color: #454b54; font-weight: 600; }
+QPushButton#settingsButton:hover { background: #f7f9fa; border-color: #aeb5bf; color: #171a1d; }
+QPushButton#settingsButton:pressed { background: #edf0f2; }
 QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item { border: none; margin: 2px 8px; border-radius: 8px; }
 QListWidget::item:selected { background: #dceee5; }

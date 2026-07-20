@@ -98,6 +98,13 @@ class HostConfig:
         return asdict(self)
 
 
+def connected_hosts_first(
+    hosts: list[HostConfig], connected_aliases: set[str]
+) -> list[HostConfig]:
+    """Return a stable display order with connected hosts at the top."""
+    return sorted(hosts, key=lambda host: host.alias not in connected_aliases)
+
+
 @dataclass(slots=True)
 class ResolvedHost:
     alias: str

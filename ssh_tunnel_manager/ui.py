@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 
 from .actions import ActionResult, HostActions
 from .dialogs import HostDialog, RemoteFolderDialog, SettingsDialog
-from .models import AppState, HostConfig
+from .models import AppState, HostConfig, connected_hosts_first
 from .resources import resource_path
 from .ssh_config import append_host_entry, parse_host_aliases, resolve_host
 from .store import StateStore
@@ -61,9 +61,11 @@ class HostRow(QWidget):
         texts.addWidget(name)
         texts.addWidget(self.subtitle)
         layout.addLayout(texts, 1)
+        self.state = "stopped"
         self.update_state("stopped")
 
     def update_state(self, state: str) -> None:
+        self.state = state
         color = STATE_COLORS.get(state, STATE_COLORS["stopped"])
         self.dot.setStyleSheet(f"background:{color}; border-radius:5px;")
 
@@ -110,8 +112,11 @@ class MainWindow(QMainWindow):
         brand_row = QHBoxLayout()
         brand = QLabel("SSH 隧道助手")
         brand.setObjectName("brand")
-        settings_button = QPushButton("设置")
-        settings_button.setObjectName("ghost")
+        settings_button = QPushButton("⚙  设置")
+        settings_button.setObjectName("settingsButton")
+        settings_button.setMinimumWidth(82)
+        settings_button.setToolTip("全局设置")
+        settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_button.clicked.connect(self.open_settings)
         brand_row.addWidget(brand)
         brand_row.addStretch()
@@ -309,7 +314,11 @@ class MainWindow(QMainWindow):
         current = select_alias or (self.selected_host().alias if self.selected_host() else None)
         self.host_list.clear()
         self.rows.clear()
-        for host in self.state.hosts:
+        connected_aliases = {
+            host.alias for host in self.state.hosts
+            if self.tunnels.runtime(host.alias).state == TunnelState.CONNECTED
+        }
+        for host in connected_hosts_first(self.state.hosts, connected_aliases):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, host.alias)
             item.setSizeHint(QSize(250, 58))
@@ -527,12 +536,15 @@ class MainWindow(QMainWindow):
 
     def _on_tunnel_event(self, alias: str, state: str, message: str) -> None:
         row = self.rows.get(alias)
+        was_connected = bool(row and row.state == TunnelState.CONNECTED.value)
         if row:
             row.update_state(state)
         host = self.selected_host()
         if host and host.alias == alias:
             self._set_badge(state)
         self.append_log(f"{alias}: {message}")
+        if was_connected != (state == TunnelState.CONNECTED.value):
+            QTimer.singleShot(0, self.refresh_hosts)
 
     def _set_badge(self, state: str, text: str | None = None) -> None:
         color = STATE_COLORS.get(state, STATE_COLORS["stopped"])

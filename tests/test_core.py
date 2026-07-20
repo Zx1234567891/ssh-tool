@@ -9,13 +9,26 @@ import unittest
 from unittest.mock import patch
 
 from ssh_tunnel_manager.actions import HostActions
-from ssh_tunnel_manager.models import AppState, HostConfig, find_vscode_path
+from ssh_tunnel_manager.models import (
+    AppState, HostConfig, connected_hosts_first, find_vscode_path,
+)
 from ssh_tunnel_manager.ssh_config import SshHostEntry, append_host_entry, parse_host_aliases
 from ssh_tunnel_manager.store import StateStore
 from ssh_tunnel_manager.tunnel import TunnelManager
 
 
 class ModelTests(unittest.TestCase):
+    def test_connected_hosts_are_stably_ordered_first(self) -> None:
+        hosts = [
+            HostConfig(alias="stopped-a"), HostConfig(alias="connected-a"),
+            HostConfig(alias="stopped-b"), HostConfig(alias="connected-b"),
+        ]
+        ordered = connected_hosts_first(hosts, {"connected-a", "connected-b"})
+        self.assertEqual(
+            [host.alias for host in ordered],
+            ["connected-a", "connected-b", "stopped-a", "stopped-b"],
+        )
+
     def test_state_round_trip(self) -> None:
         original = AppState(hosts=[HostConfig(alias="server-a", display_name="实验机", workspaces=["/workspace/a"])])
         restored = AppState.from_dict(original.to_dict())
