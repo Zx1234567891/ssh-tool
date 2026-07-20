@@ -39,6 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          $ErrorActionPreference = "Continue"
           $attempts = 6
           for ($attempt = 1; $attempt -le $attempts; $attempt++) {
             Write-Host "Release attempt $attempt of $attempts"
