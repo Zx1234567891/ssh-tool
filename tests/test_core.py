@@ -14,7 +14,7 @@ from ssh_tunnel_manager.ssh_config import (
     SshHostEntry, append_host_entry, parse_host_aliases, upsert_proxy_setenv,
 )
 from ssh_tunnel_manager.store import StateStore
-from ssh_tunnel_manager.tunnel import TunnelManager
+from ssh_tunnel_manager.tunnel import TunnelManager, TunnelState
 
 
 class ModelTests(unittest.TestCase):
@@ -120,6 +120,28 @@ class TunnelCommandTests(unittest.TestCase):
         self.assertNotIn("ClearAllForwardings=yes", command)
         self.assertIn("11099:127.0.0.1:7892", command)
         self.assertIn("ExitOnForwardFailure=yes", command)
+
+    def test_discovers_tunnel_owned_by_another_instance(self) -> None:
+        state = AppState(hosts=[HostConfig(alias="server", remote_proxy_port=11099)])
+        manager = TunnelManager(lambda: state.settings, lambda *args: None)
+        rows = [{
+            "ProcessId": 4321,
+            "CommandLine": (
+                "ssh.exe -F config -NT -R 11099:127.0.0.1:7892 server"
+            ),
+        }]
+        with patch.object(manager, "_existing_ssh_processes", return_value=rows):
+            discovered = manager.discover_existing(state.hosts)
+        runtime = manager.runtime("server")
+        self.assertEqual(discovered, ["server"])
+        self.assertEqual(runtime.state, TunnelState.CONNECTED)
+        self.assertEqual(runtime.external_pid, 4321)
+        with (
+            patch.object(manager, "_pid_is_running", return_value=True),
+            patch("ssh_tunnel_manager.tunnel.subprocess.Popen") as popen,
+        ):
+            manager.start(state.hosts[0])
+        popen.assert_not_called()
 
 
 class ActionTests(unittest.TestCase):

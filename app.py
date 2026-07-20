@@ -24,6 +24,10 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="SSH 隧道助手")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--start-enabled", action="store_true",
+        help="start all hosts marked as enabled for this launch",
+    )
     args = parser.parse_args()
     if args.self_test:
         return self_test()
@@ -41,7 +45,7 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
     app.setWindowIcon(QIcon(str(resource_path("assets/logo.png"))))
-    window = MainWindow()
+    window = MainWindow(start_enabled_now=args.start_enabled)
     window.show()
     return app.exec()
 

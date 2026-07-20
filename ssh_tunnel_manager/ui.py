@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .actions import ActionResult, HostActions
+from . import __version__
 from .dialogs import HostDialog, RemoteFolderDialog, SettingsDialog
 from .models import AppState, HostConfig, connected_hosts_first
 from .resources import resource_path
@@ -73,9 +74,9 @@ class HostRow(QWidget):
 class MainWindow(QMainWindow):
     tunnel_event = pyqtSignal(str, str, str)
 
-    def __init__(self) -> None:
+    def __init__(self, start_enabled_now: bool = False) -> None:
         super().__init__()
-        self.setWindowTitle("SSH 隧道助手")
+        self.setWindowTitle(f"SSH 隧道助手 v{__version__}")
         self.resize(1160, 760)
         self.setMinimumSize(940, 650)
         self.store = StateStore()
@@ -93,8 +94,15 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self._import_if_empty()
+        external_tunnels = self.tunnels.discover_existing(self.state.hosts)
         self.refresh_hosts()
-        QTimer.singleShot(450, self._auto_start)
+        for alias in external_tunnels:
+            self.append_log(f"{alias}: 检测到已运行隧道，由原助手窗口继续管理")
+        self.external_tunnel_timer = QTimer(self)
+        self.external_tunnel_timer.timeout.connect(self.tunnels.check_external)
+        self.external_tunnel_timer.start(5000)
+        if start_enabled_now or self.state.settings.start_enabled_on_launch:
+            QTimer.singleShot(450, self._auto_start)
 
     def _build_ui(self) -> None:
         root = QWidget()
