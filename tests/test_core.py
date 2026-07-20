@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,10 +15,11 @@ from ssh_tunnel_manager.tunnel import TunnelManager
 
 class ModelTests(unittest.TestCase):
     def test_state_round_trip(self) -> None:
-        original = AppState(hosts=[HostConfig(alias="server-a", display_name="实验机")])
+        original = AppState(hosts=[HostConfig(alias="server-a", display_name="实验机", workspaces=["/workspace/a"])])
         restored = AppState.from_dict(original.to_dict())
         self.assertEqual(restored.hosts[0].alias, "server-a")
         self.assertEqual(restored.hosts[0].display_name, "实验机")
+        self.assertEqual(restored.hosts[0].workspaces, ["/workspace/a"])
 
     def test_store_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -72,6 +74,19 @@ class ActionTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertEqual(command[0], str(fake_code))
             self.assertEqual(command[1:], ["--remote", "ssh-remote+server-a", "/workspace"])
+
+    def test_remote_directory_listing_is_parsed(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"path":"/home/demo","parent":"/home","directories":[["project","/home/demo/project"]]}\n',
+            stderr="",
+        )
+        with patch.object(actions, "_run", return_value=completed):
+            listing = actions.list_remote_directories(HostConfig(alias="server-a"), "~")
+        self.assertEqual(listing.path, "/home/demo")
+        self.assertEqual(listing.directories, [("project", "/home/demo/project")])
 
 
 if __name__ == "__main__":

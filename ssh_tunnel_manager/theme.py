@@ -8,8 +8,8 @@ QLabel#pageTitle { font-size: 24px; font-weight: 700; color: #171a1d; }
 QLabel#muted { color: #89909a; }
 QLabel#sectionTitle { font-size: 15px; font-weight: 650; }
 QFrame#card { background: white; border: 1px solid #e8eaed; border-radius: 12px; }
-QLineEdit, QSpinBox { background: white; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px 10px; min-height: 20px; }
-QLineEdit:focus, QSpinBox:focus { border: 1px solid #07c160; }
+QLineEdit, QSpinBox, QComboBox { background: white; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px 10px; min-height: 20px; }
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #07c160; }
 QPushButton { background: white; border: 1px solid #dfe3e8; border-radius: 7px; padding: 8px 14px; }
 QPushButton:hover { background: #f3f5f6; border-color: #cbd0d6; }
 QPushButton:pressed { background: #e9ecef; }
@@ -24,6 +24,7 @@ QListWidget::item:hover:!selected { background: #e7e9eb; }
 QPlainTextEdit { background: #20242a; color: #d7dce2; border: none; border-radius: 9px; padding: 9px; font-family: Consolas; font-size: 12px; }
 QCheckBox { spacing: 7px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
+QComboBox::drop-down { border: none; width: 24px; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
 QScrollBar::handle:vertical { background: #c7ccd2; border-radius: 4px; min-height: 30px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }

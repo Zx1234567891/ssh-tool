@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import os
 import shlex
 import socket
@@ -15,6 +16,13 @@ class ActionResult:
     ok: bool
     title: str
     detail: str
+
+
+@dataclass
+class RemoteDirectoryListing:
+    path: str
+    parent: str
+    directories: list[tuple[str, str]]
 
 
 class HostActions:
@@ -80,6 +88,49 @@ class HostActions:
         detail = first_line[0] if first_line else result.stderr.strip()
         ok = result.returncode == 0 and detail.startswith("HTTP/")
         return ActionResult(ok, "远程代理正常" if ok else "远程代理测试失败", detail)
+
+    def list_remote_directories(self, host: HostConfig, path: str) -> RemoteDirectoryListing:
+        script = r'''import json
+import os
+import sys
+
+requested = sys.argv[1] if len(sys.argv) > 1 else "~"
+current = os.path.abspath(os.path.expanduser(requested))
+if not os.path.isdir(current):
+    raise NotADirectoryError(current)
+directories = []
+with os.scandir(current) as entries:
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=True):
+                directories.append((entry.name, os.path.join(current, entry.name)))
+        except OSError:
+            continue
+directories.sort(key=lambda item: item[0].casefold())
+print(json.dumps({
+    "path": current,
+    "parent": os.path.dirname(current) or current,
+    "directories": directories[:500],
+}, ensure_ascii=False))
+'''
+        remote = "python3 - " + shlex.quote(path or "~")
+        try:
+            result = self._run(
+                self._ssh(host.alias, remote), self.settings.connect_timeout + 15, script
+            )
+        except Exception as exc:
+            raise RuntimeError(f"读取远程目录失败：{exc}") from exc
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "无法读取远程目录")
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            return RemoteDirectoryListing(
+                path=payload["path"],
+                parent=payload["parent"],
+                directories=[(item[0], item[1]) for item in payload["directories"]],
+            )
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"远程目录响应格式无效：{result.stdout.strip()}") from exc
 
     def configure_remote_shell(self, host: HostConfig) -> ActionResult:
         port = host.remote_proxy_port

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import threading
+
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QSpinBox, QStyle, QVBoxLayout, QWidget,
 )
 
+from .actions import HostActions, RemoteDirectoryListing
 from .models import AppSettings, HostConfig
 
 
@@ -13,6 +18,7 @@ class HostDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("编辑主机" if host else "添加主机")
         self.setMinimumWidth(440)
+        self._workspaces = list(host.workspaces) if host else []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         title = QLabel("主机设置")
@@ -61,8 +67,146 @@ class HostDialog(QDialog):
             alias=alias, display_name=self.display_name.text().strip() or alias,
             enabled=self.auto_start.isChecked(), remote_proxy_port=self.remote_port.value(),
             remote_dir=self.remote_dir.text().strip() or "~",
+            workspaces=list(host_path for host_path in getattr(self, "_workspaces", [])),
             auto_reconnect=self.auto_reconnect.isChecked(),
         )
+
+
+class RemoteFolderDialog(QDialog):
+    listing_ready = pyqtSignal(int, object)
+    listing_failed = pyqtSignal(int, str)
+
+    def __init__(self, host: HostConfig, actions: HostActions, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("选择 VSCode 工作区")
+        self.resize(680, 520)
+        self.setMinimumSize(560, 420)
+        self.host = host
+        self.actions = actions
+        self.current_path = host.remote_dir or "~"
+        self.parent_path = self.current_path
+        self._request_id = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        title = QLabel("选择远程工作区")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        hint = QLabel(f"通过 SSH 浏览 {host.display_name} 上的文件夹，双击目录可进入。")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        navigation = QHBoxLayout()
+        self.up_button = QPushButton("上一级")
+        self.refresh_button = QPushButton("刷新")
+        self.location = QComboBox()
+        self.location.setEditable(True)
+        self.location.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        choices: list[str] = []
+        for value in [host.remote_dir, *host.workspaces, "~"]:
+            value = value.strip()
+            if value and value not in choices:
+                choices.append(value)
+        self.location.addItems(choices)
+        self.location.setCurrentText(self.current_path)
+        self.location.setPlaceholderText("远程文件夹路径")
+        self.go_button = QPushButton("转到")
+        navigation.addWidget(self.up_button)
+        navigation.addWidget(self.location, 1)
+        navigation.addWidget(self.go_button)
+        navigation.addWidget(self.refresh_button)
+        layout.addLayout(navigation)
+
+        self.directory_list = QListWidget()
+        self.directory_list.setAlternatingRowColors(False)
+        self.directory_list.setSpacing(2)
+        self.directory_list.itemDoubleClicked.connect(self._enter_item)
+        layout.addWidget(self.directory_list, 1)
+        self.status = QLabel("正在读取远程目录…")
+        self.status.setObjectName("muted")
+        layout.addWidget(self.status)
+
+        self.remember = QCheckBox("设为这台主机的默认工作区")
+        self.remember.setChecked(True)
+        layout.addWidget(self.remember)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Open)
+        open_button = buttons.button(QDialogButtonBox.StandardButton.Open)
+        if open_button:
+            open_button.setText("选择文件夹并打开")
+            open_button.setObjectName("primary")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.up_button.clicked.connect(lambda: self.load_path(self.parent_path))
+        self.refresh_button.clicked.connect(lambda: self.load_path(self.current_path))
+        self.go_button.clicked.connect(lambda: self.load_path(self.location.currentText().strip()))
+        if self.location.lineEdit():
+            self.location.lineEdit().returnPressed.connect(
+                lambda: self.load_path(self.location.currentText().strip())
+            )
+        self.listing_ready.connect(self._show_listing)
+        self.listing_failed.connect(self._show_error)
+        self.load_path(self.current_path)
+
+    def load_path(self, path: str) -> None:
+        path = path.strip() or "~"
+        self._request_id += 1
+        request_id = self._request_id
+        self.status.setText(f"正在读取 {path} …")
+        self.directory_list.setEnabled(False)
+        threading.Thread(
+            target=self._load_worker, args=(request_id, path), daemon=True
+        ).start()
+
+    def _load_worker(self, request_id: int, path: str) -> None:
+        try:
+            listing = self.actions.list_remote_directories(self.host, path)
+            self.listing_ready.emit(request_id, listing)
+        except Exception as exc:
+            self.listing_failed.emit(request_id, str(exc))
+
+    def _show_listing(self, request_id: int, listing: RemoteDirectoryListing) -> None:
+        if request_id != self._request_id:
+            return
+        self.current_path = listing.path
+        self.parent_path = listing.parent
+        self.location.setCurrentText(listing.path)
+        if self.location.findText(listing.path) < 0:
+            self.location.insertItem(0, listing.path)
+        self.directory_list.clear()
+        folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        for name, full_path in listing.directories:
+            item = QListWidgetItem(folder_icon, name)
+            item.setData(Qt.ItemDataRole.UserRole, full_path)
+            item.setToolTip(full_path)
+            self.directory_list.addItem(item)
+        self.directory_list.setEnabled(True)
+        self.status.setText(f"当前文件夹：{listing.path}    ·    {len(listing.directories)} 个子目录")
+
+    def _show_error(self, request_id: int, message: str) -> None:
+        if request_id != self._request_id:
+            return
+        self.directory_list.setEnabled(True)
+        self.status.setText("读取失败")
+        QMessageBox.warning(self, "无法读取远程文件夹", message)
+
+    def _enter_item(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self.load_path(path)
+
+    def accept(self) -> None:
+        if not self.path():
+            self.location.setFocus()
+            return
+        super().accept()
+
+    def path(self) -> str:
+        selected = self.directory_list.currentItem()
+        if selected:
+            return selected.data(Qt.ItemDataRole.UserRole) or self.current_path
+        return self.current_path
 
 
 class SettingsDialog(QDialog):

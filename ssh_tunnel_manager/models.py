@@ -82,6 +82,7 @@ class HostConfig:
     enabled: bool = False
     remote_proxy_port: int = 10099
     remote_dir: str = "~"
+    workspaces: list[str] = field(default_factory=list)
     auto_reconnect: bool = True
 
     def __post_init__(self) -> None:

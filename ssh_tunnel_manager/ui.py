@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 import traceback
 
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .actions import ActionResult, HostActions
-from .dialogs import HostDialog, SettingsDialog
+from .dialogs import HostDialog, RemoteFolderDialog, SettingsDialog
 from .models import AppState, HostConfig
 from .resources import resource_path
 from .ssh_config import parse_host_aliases, resolve_host
@@ -474,9 +475,27 @@ class MainWindow(QMainWindow):
         host = self.selected_host()
         if not host:
             return
+        if kind == "vscode":
+            self._launch_vscode_workspace(host)
+            return
         try:
             {"terminal": self.actions.launch_terminal, "vscode": self.actions.launch_vscode, "codex": self.actions.launch_codex}[kind](host)
             self.append_log(f"已为 {host.alias} 打开 {kind}")
+        except Exception as exc:
+            QMessageBox.warning(self, "启动失败", str(exc))
+
+    def _launch_vscode_workspace(self, host: HostConfig) -> None:
+        dialog = RemoteFolderDialog(host, self.actions, self)
+        if not dialog.exec():
+            return
+        workspace = dialog.path()
+        host.workspaces = [workspace, *[item for item in host.workspaces if item != workspace]][:10]
+        if dialog.remember.isChecked():
+            host.remote_dir = workspace
+        self.store.save(self.state)
+        try:
+            self.actions.launch_vscode(replace(host, remote_dir=workspace))
+            self.append_log(f"已用 VSCode 打开 {host.alias}:{workspace}")
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", str(exc))
 
