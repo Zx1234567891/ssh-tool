@@ -34,8 +34,34 @@ jobs:
         run: .\build.ps1
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          files: dist/SshTunnelManager.exe
-          generate_release_notes: true
-          name: SSH Tunnel Manager ${{ github.ref_name }}
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $attempts = 6
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            Write-Host "Release attempt $attempt of $attempts"
+
+            gh release view $env:GITHUB_REF_NAME *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release upload $env:GITHUB_REF_NAME dist/SshTunnelManager.exe --clobber
+            }
+            else {
+              gh release create $env:GITHUB_REF_NAME dist/SshTunnelManager.exe `
+                --verify-tag `
+                --generate-notes `
+                --title "SSH Tunnel Manager $env:GITHUB_REF_NAME"
+            }
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Release published successfully."
+              exit 0
+            }
+            if ($attempt -lt $attempts) {
+              $delay = 15 * $attempt
+              Write-Warning "GitHub Release service failed; retrying in $delay seconds."
+              Start-Sleep -Seconds $delay
+            }
+          }
+          throw "Unable to publish the release after $attempts attempts."
