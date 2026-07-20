@@ -2,10 +2,92 @@ from __future__ import annotations
 
 from pathlib import Path
 import glob
+import os
+import re
 import shlex
+import shutil
 import subprocess
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime
 
 from .models import ResolvedHost
+
+
+@dataclass(slots=True)
+class SshHostEntry:
+    alias: str
+    hostname: str
+    user: str
+    port: int = 22
+    identity_file: str = ""
+    proxy_jump: str = ""
+
+
+def _validate_single_line(label: str, value: str) -> str:
+    value = value.strip()
+    if not value or "\n" in value or "\r" in value:
+        raise ValueError(f"{label}不能为空或包含换行")
+    return value
+
+
+def append_host_entry(config_path: str, entry: SshHostEntry) -> Path | None:
+    """Append one literal Host block, preserving the existing file and a backup."""
+    alias = _validate_single_line("SSH 别名", entry.alias)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", alias):
+        raise ValueError("SSH 别名只能包含字母、数字、点、下划线和短横线")
+    hostname = _validate_single_line("主机地址", entry.hostname)
+    user = _validate_single_line("用户名", entry.user)
+    if not 1 <= int(entry.port) <= 65535:
+        raise ValueError("SSH 端口必须在 1 到 65535 之间")
+    if "*" in alias or "?" in alias or "!" in alias:
+        raise ValueError("新主机别名不能包含通配符")
+
+    path = Path(config_path).expanduser()
+    existing_aliases = parse_host_aliases(str(path)) if path.exists() else []
+    if alias.casefold() in {item.casefold() for item in existing_aliases}:
+        raise ValueError(f"SSH config 中已存在 Host {alias}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup: Path | None = None
+    existing = ""
+    if path.exists():
+        existing = path.read_text(encoding="utf-8-sig", errors="replace")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.ssh-tunnel-manager-backup-{stamp}")
+        shutil.copy2(path, backup)
+
+    lines = [
+        "# Added by SSH Tunnel Manager",
+        f"Host {alias}",
+        f"  HostName {hostname}",
+        f"  User {user}",
+        f"  Port {int(entry.port)}",
+    ]
+    if entry.identity_file.strip():
+        identity = str(Path(entry.identity_file.strip()).expanduser()).replace("\\", "/").replace('"', '\\"')
+        lines.append(f'  IdentityFile "{identity}"')
+    if entry.proxy_jump.strip():
+        jump = _validate_single_line("跳板机", entry.proxy_jump)
+        lines.append(f"  ProxyJump {jump}")
+    lines.extend(["  ServerAliveInterval 30", "  ServerAliveCountMax 3"])
+    block = "\n".join(lines) + "\n"
+    payload = existing
+    if payload and not payload.endswith(("\n", "\r")):
+        payload += "\n"
+    if payload:
+        payload += "\n"
+    payload += block
+
+    fd, temporary_name = tempfile.mkstemp(prefix="ssh-config-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    return backup
 
 
 def _clean_value(value: str) -> str:

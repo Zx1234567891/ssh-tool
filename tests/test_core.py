@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from ssh_tunnel_manager.actions import HostActions
 from ssh_tunnel_manager.models import AppState, HostConfig, find_vscode_path
-from ssh_tunnel_manager.ssh_config import parse_host_aliases
+from ssh_tunnel_manager.ssh_config import SshHostEntry, append_host_entry, parse_host_aliases
 from ssh_tunnel_manager.store import StateStore
 from ssh_tunnel_manager.tunnel import TunnelManager
 
@@ -49,6 +49,35 @@ class SshConfigTests(unittest.TestCase):
             (root / "extra.conf").write_text("Host jump\n", encoding="utf-8")
             (root / "config").write_text("Include extra.conf\nHost target\n", encoding="utf-8")
             self.assertEqual(parse_host_aliases(str(root / "config")), ["jump", "target"])
+
+    def test_append_new_host_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config"
+            path.write_text("Host existing\n  HostName 10.0.0.1\n", encoding="utf-8")
+            backup = append_host_entry(
+                str(path),
+                SshHostEntry(
+                    alias="gpu-server", hostname="10.0.0.2", user="demo",
+                    port=2222, identity_file=str(Path(folder) / "id_ed25519"),
+                    proxy_jump="jump",
+                ),
+            )
+            self.assertIsNotNone(backup)
+            self.assertTrue(backup.is_file())
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("Host gpu-server", text)
+            self.assertIn("HostName 10.0.0.2", text)
+            self.assertIn("Port 2222", text)
+            self.assertIn("ProxyJump jump", text)
+
+    def test_append_rejects_duplicate_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config"
+            path.write_text("Host existing\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                append_host_entry(
+                    str(path), SshHostEntry(alias="existing", hostname="10.0.0.2", user="demo")
+                )
 
 
 class TunnelCommandTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -11,27 +12,53 @@ from PyQt6.QtWidgets import (
 
 from .actions import HostActions, RemoteDirectoryListing
 from .models import AppSettings, HostConfig
+from .ssh_config import SshHostEntry
 
 
 class HostDialog(QDialog):
     def __init__(self, parent=None, host: HostConfig | None = None, default_port: int = 10099) -> None:
         super().__init__(parent)
         self.setWindowTitle("编辑主机" if host else "添加主机")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(520)
         self._workspaces = list(host.workspaces) if host else []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         title = QLabel("主机设置")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        hint = QLabel("SSH 别名来自 ~/.ssh/config；软件不会保存密码或私钥。")
+        hint = QLabel(
+            "编辑列表中的已有连接。" if host else
+            "新主机可直接写入 ~/.ssh/config；软件不会保存 SSH 密码。"
+        )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         form = QFormLayout()
+        self._form = form
         form.setSpacing(13)
         self.alias = QLineEdit(host.alias if host else "")
-        self.alias.setPlaceholderText("例如 10.150.16.39 或 myserver")
+        self.alias.setPlaceholderText("你为连接起的名称，例如 gpu-server")
+        self.write_config = QCheckBox("这是新连接，同时写入 SSH config")
+        self.write_config.setChecked(host is None)
+        self.write_config.setVisible(host is None)
+        self.hostname = QLineEdit()
+        self.hostname.setPlaceholderText("服务器 IP 或域名，例如 10.150.16.39")
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("例如 wfy、root、ubuntu")
+        self.ssh_port = QSpinBox()
+        self.ssh_port.setRange(1, 65535)
+        self.ssh_port.setValue(22)
+        identity_holder = QWidget()
+        identity_layout = QHBoxLayout(identity_holder)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        self.identity_file = QLineEdit()
+        self.identity_file.setPlaceholderText("可选；留空使用 SSH 默认密钥")
+        identity_button = QPushButton("浏览")
+        identity_button.clicked.connect(self._choose_identity)
+        identity_layout.addWidget(self.identity_file, 1)
+        identity_layout.addWidget(identity_button)
+        self.proxy_jump = QLineEdit()
+        self.proxy_jump.setPlaceholderText("可选；填写已有 SSH 别名，例如 JumpServer")
         self.display_name = QLineEdit(host.display_name if host else "")
         self.display_name.setPlaceholderText("留空则使用 SSH 别名")
         self.remote_port = QSpinBox()
@@ -43,13 +70,31 @@ class HostDialog(QDialog):
         self.auto_start = QCheckBox("软件启动时自动建立隧道")
         self.auto_start.setChecked(host.enabled if host else False)
         form.addRow("SSH 别名", self.alias)
+        form.addRow("", self.write_config)
+        form.addRow("主机地址", self.hostname)
+        form.addRow("用户名", self.username)
+        form.addRow("SSH 端口", self.ssh_port)
+        form.addRow("私钥文件", identity_holder)
+        form.addRow("跳板机", self.proxy_jump)
         form.addRow("显示名称", self.display_name)
         form.addRow("远程代理端口", self.remote_port)
         form.addRow("默认远程目录", self.remote_dir)
         form.addRow("", self.auto_reconnect)
         form.addRow("", self.auto_start)
         layout.addLayout(form)
+        self._connection_widgets = [
+            self.hostname, self.username, self.ssh_port, identity_holder, self.proxy_jump
+        ]
+        self.write_config.toggled.connect(self._toggle_connection_fields)
+        self._toggle_connection_fields(self.write_config.isChecked() and host is None)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if save_button:
+            save_button.setText("保存")
+            save_button.setObjectName("primary")
+        if cancel_button:
+            cancel_button.setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -59,7 +104,30 @@ class HostDialog(QDialog):
             self.alias.setFocus()
             self.alias.setStyleSheet("border: 1px solid #e05252;")
             return
+        if self.write_config.isVisible() and self.write_config.isChecked():
+            if not self.hostname.text().strip():
+                self.hostname.setFocus()
+                return
+            if not self.username.text().strip():
+                self.username.setFocus()
+                return
+            identity = self.identity_file.text().strip()
+            if identity and not Path(identity).expanduser().is_file():
+                QMessageBox.warning(self, "私钥文件不存在", identity)
+                self.identity_file.setFocus()
+                return
         super().accept()
+
+    def _toggle_connection_fields(self, visible: bool) -> None:
+        for widget in self._connection_widgets:
+            self._form.setRowVisible(widget, visible)
+
+    def _choose_identity(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 SSH 私钥", str(Path.home() / ".ssh"), "所有文件 (*)"
+        )
+        if path:
+            self.identity_file.setText(path)
 
     def value(self) -> HostConfig:
         alias = self.alias.text().strip()
@@ -69,6 +137,18 @@ class HostDialog(QDialog):
             remote_dir=self.remote_dir.text().strip() or "~",
             workspaces=list(host_path for host_path in getattr(self, "_workspaces", [])),
             auto_reconnect=self.auto_reconnect.isChecked(),
+        )
+
+    def ssh_entry(self) -> SshHostEntry | None:
+        if not self.write_config.isVisible() or not self.write_config.isChecked():
+            return None
+        return SshHostEntry(
+            alias=self.alias.text().strip(),
+            hostname=self.hostname.text().strip(),
+            user=self.username.text().strip(),
+            port=self.ssh_port.value(),
+            identity_file=self.identity_file.text().strip(),
+            proxy_jump=self.proxy_jump.text().strip(),
         )
 
 

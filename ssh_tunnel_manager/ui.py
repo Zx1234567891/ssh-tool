@@ -17,7 +17,7 @@ from .actions import ActionResult, HostActions
 from .dialogs import HostDialog, RemoteFolderDialog, SettingsDialog
 from .models import AppState, HostConfig
 from .resources import resource_path
-from .ssh_config import parse_host_aliases, resolve_host
+from .ssh_config import append_host_entry, parse_host_aliases, resolve_host
 from .store import StateStore
 from .theme import STATE_BACKGROUNDS, STATE_COLORS, STATE_TEXT
 from .tunnel import TunnelManager, TunnelState
@@ -377,6 +377,15 @@ class MainWindow(QMainWindow):
             if self._host(host.alias):
                 QMessageBox.warning(self, "主机已存在", "这个 SSH 别名已经在列表中。")
                 return
+            entry = dialog.ssh_entry()
+            if entry:
+                try:
+                    backup = append_host_entry(self.state.settings.ssh_config_path, entry)
+                except Exception as exc:
+                    QMessageBox.warning(self, "SSH 配置写入失败", str(exc))
+                    return
+                backup_text = f"；备份：{backup}" if backup else ""
+                self.append_log(f"已将 Host {entry.alias} 写入 SSH config{backup_text}")
             self.state.hosts.append(host)
             self.store.save(self.state)
             self.refresh_hosts(host.alias)
