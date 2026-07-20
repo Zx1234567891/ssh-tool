@@ -94,6 +94,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self._import_if_empty()
+        for host in self.state.hosts:
+            try:
+                self.actions.configure_vscode_environment(host)
+            except Exception as exc:
+                self.append_log(f"{host.alias}: 本机 VSCode 端口映射失败：{exc}")
         external_tunnels = self.tunnels.discover_existing(self.state.hosts)
         self.refresh_hosts()
         for alias in external_tunnels:
@@ -101,6 +106,7 @@ class MainWindow(QMainWindow):
         self.external_tunnel_timer = QTimer(self)
         self.external_tunnel_timer.timeout.connect(self.tunnels.check_external)
         self.external_tunnel_timer.start(5000)
+        QTimer.singleShot(900, self._install_vscode_bridge_background)
         if start_enabled_now or self.state.settings.start_enabled_on_launch:
             QTimer.singleShot(450, self._auto_start)
 
@@ -234,7 +240,7 @@ class MainWindow(QMainWindow):
         tests = QHBoxLayout()
         for text, callback in [
             ("测试本地代理", self.test_local), ("测试 SSH", self.test_ssh),
-            ("测试远程代理", self.test_remote), ("安装代理切换器", self.configure_remote),
+            ("测试远程代理", self.test_remote), ("安装 VSCode 组件", self.configure_vscode_bridge),
             ("Codex 冒烟测试", self.smoke_codex),
         ]:
             button = QPushButton(text)
@@ -406,8 +412,8 @@ class MainWindow(QMainWindow):
             self.state.hosts.append(host)
             self.store.save(self.state)
             try:
-                proxy_config = self.actions.configure_local_ssh_proxy(host)
-                self.append_log(f"已为 {host.alias} 保存本机代理端口：{proxy_config}")
+                mapping = self.actions.configure_vscode_environment(host)
+                self.append_log(f"已为 {host.alias} 保存 VSCode 代理端口：{mapping}")
             except Exception as exc:
                 QMessageBox.warning(self, "代理端口配置失败", str(exc))
             self.refresh_hosts(host.alias)
@@ -428,8 +434,8 @@ class MainWindow(QMainWindow):
             self.state.hosts[index] = updated
             self.store.save(self.state)
             try:
-                proxy_config = self.actions.configure_local_ssh_proxy(updated)
-                self.append_log(f"已为 {updated.alias} 更新本机代理端口：{proxy_config}")
+                mapping = self.actions.configure_vscode_environment(updated)
+                self.append_log(f"已为 {updated.alias} 更新 VSCode 代理端口：{mapping}")
             except Exception as exc:
                 QMessageBox.warning(self, "代理端口配置失败", str(exc))
             self.refresh_hosts(updated.alias)
@@ -486,17 +492,23 @@ class MainWindow(QMainWindow):
         if host:
             self._action("测试远程代理", lambda: self.actions.test_remote_proxy(host))
 
-    def configure_remote(self) -> None:
+    def configure_vscode_bridge(self) -> None:
         host = self.selected_host()
-        if not host:
-            return
-        answer = QMessageBox.question(
-            self, "安装代理切换器",
-            "将备份远程 ~/.bashrc，移除旧的固定代理端口，并安装 stm_proxy_use/stm_proxy_off 命令。\n"
-            "从软件打开 SSH、VSCode 或 Codex 时会自动选择本机对应端口。是否继续？",
+        if host:
+            try:
+                mapping = self.actions.configure_vscode_environment(host)
+                self.append_log(f"{host.alias}: 已更新本机 VSCode 端口映射：{mapping}")
+            except Exception as exc:
+                QMessageBox.warning(self, "VSCode 配置失败", str(exc))
+                return
+        self._action("安装 VSCode 配套组件", self.actions.install_vscode_bridge)
+
+    def _install_vscode_bridge_background(self) -> None:
+        self._run_async(
+            "检查 VSCode 配套组件",
+            self.actions.install_vscode_bridge,
+            self._show_result,
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._action("安装代理切换器", lambda: self.actions.configure_remote_shell(host))
 
     def smoke_codex(self) -> None:
         host = self.selected_host()

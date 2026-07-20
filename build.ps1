@@ -12,5 +12,6 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --workpath $WorkPath `
   --icon "assets\logo.ico" `
   --add-data "assets\logo.png;assets" `
+  --add-data "vscode_extension;vscode_extension" `
   app.py
 Write-Host "Built: $project\$DistPath\SshTunnelManager.exe"

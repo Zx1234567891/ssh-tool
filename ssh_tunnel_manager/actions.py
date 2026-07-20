@@ -10,6 +10,7 @@ import subprocess
 
 from .models import AppSettings, HostConfig, find_vscode_path
 from .ssh_config import upsert_proxy_setenv
+from .vscode_bridge import ensure_extension_installed, update_proxy_map
 
 
 @dataclass
@@ -69,6 +70,24 @@ class HostActions:
     def configure_local_ssh_proxy(self, host: HostConfig) -> Path:
         return upsert_proxy_setenv(
             self.settings.ssh_config_path, host.alias, host.remote_proxy_port
+        )
+
+    def configure_vscode_environment(self, host: HostConfig) -> Path:
+        return update_proxy_map(host)
+
+    def install_vscode_bridge(self) -> ActionResult:
+        executable = self.settings.vscode_path or find_vscode_path()
+        if not executable:
+            return ActionResult(False, "VSCode 配套组件安装失败", "未找到 Code.exe")
+        path = Path(executable)
+        if not path.is_file():
+            return ActionResult(False, "VSCode 配套组件安装失败", f"路径不存在：{path}")
+        self.settings.vscode_path = str(path)
+        ok, detail = ensure_extension_installed(path)
+        return ActionResult(
+            ok,
+            "VSCode 配套组件已就绪" if ok else "VSCode 配套组件安装失败",
+            detail,
         )
 
     @staticmethod
@@ -282,7 +301,10 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
         if not path.is_file():
             raise FileNotFoundError(f"VSCode 路径不存在：{path}。请在设置中重新选择。")
         self.settings.vscode_path = str(path)
-        self.configure_local_ssh_proxy(host)
+        self.configure_vscode_environment(host)
+        installed, detail = ensure_extension_installed(path)
+        if not installed:
+            raise RuntimeError(f"VSCode 配套组件安装失败：{detail}")
         arguments = [
             "--new-window",
             "--remote", f"ssh-remote+{host.alias}", host.remote_dir,

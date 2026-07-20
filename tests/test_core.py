@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from ssh_tunnel_manager.actions import HostActions
 from ssh_tunnel_manager.models import (
@@ -15,6 +18,7 @@ from ssh_tunnel_manager.ssh_config import (
 )
 from ssh_tunnel_manager.store import StateStore
 from ssh_tunnel_manager.tunnel import TunnelManager, TunnelState
+from ssh_tunnel_manager.vscode_bridge import build_extension_vsix, update_proxy_map
 
 
 class ModelTests(unittest.TestCase):
@@ -112,6 +116,27 @@ class SshConfigTests(unittest.TestCase):
             self.assertTrue(generated.rstrip().endswith("Host *"))
 
 
+class VsCodeBridgeTests(unittest.TestCase):
+    def test_proxy_map_keeps_separate_host_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.dict(os.environ, {"APPDATA": folder}):
+                path = update_proxy_map(HostConfig(alias="server-a", remote_proxy_port=10098))
+                update_proxy_map(HostConfig(alias="server-b", remote_proxy_port=10094))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["hosts"]["server-a"]["port"], 10098)
+            self.assertEqual(payload["hosts"]["server-b"]["port"], 10094)
+
+    def test_extension_vsix_contains_required_files(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = build_extension_vsix(Path(folder) / "bridge.vsix")
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+            self.assertIn("extension.vsixmanifest", names)
+            self.assertIn("[Content_Types].xml", names)
+            self.assertIn("extension/package.json", names)
+            self.assertIn("extension/extension.js", names)
+
+
 class TunnelCommandTests(unittest.TestCase):
     def test_dedicated_forward_contains_required_options(self) -> None:
         state = AppState(hosts=[HostConfig(alias="server", remote_proxy_port=11099)])
@@ -169,7 +194,7 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("200 Connection established", result.detail)
 
-    def test_vscode_launch_reuses_default_profile_and_syncs_ssh_port(self) -> None:
+    def test_vscode_launch_reuses_default_profile_and_only_syncs_local_map(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             fake_code = Path(folder) / "Code.exe"
             fake_code.write_bytes(b"not-executed")
@@ -180,7 +205,9 @@ class ActionTests(unittest.TestCase):
                 alias="server-a", remote_dir="/workspace", remote_proxy_port=11099
             )
             with (
-                patch.object(actions, "configure_local_ssh_proxy") as configure,
+                patch.object(actions, "configure_vscode_environment") as configure_environment,
+                patch.object(actions, "configure_local_ssh_proxy") as configure_ssh,
+                patch("ssh_tunnel_manager.actions.ensure_extension_installed", return_value=(True, "OK")),
                 patch("ssh_tunnel_manager.actions.subprocess.Popen") as popen,
             ):
                 actions.launch_vscode(host)
@@ -189,7 +216,8 @@ class ActionTests(unittest.TestCase):
             self.assertNotIn("--user-data-dir", command)
             self.assertIn("--new-window", command)
             self.assertEqual(command[-3:], ["--remote", "ssh-remote+server-a", "/workspace"])
-            configure.assert_called_once_with(host)
+            configure_environment.assert_called_once_with(host)
+            configure_ssh.assert_not_called()
 
     def test_remote_shell_installs_selector_without_fixed_port(self) -> None:
         state = AppState()

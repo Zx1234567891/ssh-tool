@@ -1,0 +1,33 @@
+{
+  "name": "ssh-tunnel-manager-env",
+  "displayName": "SSH Tunnel Manager Environment",
+  "description": "Injects per-host proxy variables into Remote-SSH terminals from the local SSH Tunnel Manager map.",
+  "version": "1.0.1",
+  "publisher": "elpco",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sshTunnelManager.refreshProxyEnvironment",
+        "title": "SSH Tunnel Manager: Refresh Proxy Environment"
+      },
+      {
+        "command": "sshTunnelManager.showProxyEnvironment",
+        "title": "SSH Tunnel Manager: Show Proxy Environment"
+      }
+    ]
+  }
+}
