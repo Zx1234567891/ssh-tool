@@ -184,6 +184,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("stm_proxy_use", script)
         self.assertIn("stm_proxy_off", script)
         self.assertNotIn("10099", script)
+        self.assertIn("localhost|127[.]0[.]0[.]1", script)
         self.assertEqual(command[-1], "tr -d '\\015' | bash -s")
 
     def test_terminal_and_codex_receive_selected_proxy_port(self) -> None:

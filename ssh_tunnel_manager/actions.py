@@ -234,7 +234,14 @@ touch "$file"
 stamp=$(date +%Y%m%d-%H%M%S)
 cp "$file" "$file.ssh-tunnel-manager-backup-$stamp"
 tmp=$(mktemp)
-awk 'BEGIN {skip=0} $0=="# >>> SSH Tunnel Manager >>>" {skip=1;next} $0=="# <<< SSH Tunnel Manager <<<" {skip=0;next} !skip {print}' "$file" > "$tmp"
+awk '
+BEGIN {skip=0}
+$0=="# >>> SSH Tunnel Manager >>>" {skip=1;next}
+$0=="# <<< SSH Tunnel Manager <<<" {skip=0;next}
+skip {next}
+$0 ~ /^[[:space:]]*export[[:space:]]+(http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY)="?http:\/\/(localhost|127[.]0[.]0[.]1):[0-9]+"?[[:space:]]*$/ {next}
+{print}
+' "$file" > "$tmp"
 cat >> "$tmp" <<'EOF'
 # >>> SSH Tunnel Manager >>>
 stm_proxy_use() {
