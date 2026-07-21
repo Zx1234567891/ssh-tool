@@ -47,6 +47,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored.hosts[0].display_name, "实验机")
         self.assertEqual(restored.hosts[0].workspaces, ["/workspace/a"])
         self.assertEqual(restored.hosts[0].id, original.hosts[0].id)
+        self.assertFalse(restored.settings.automatic_health_checks)
 
     def test_workspace_history_is_recent_unique_and_bounded(self) -> None:
         host = HostConfig(

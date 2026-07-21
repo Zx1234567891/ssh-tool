@@ -87,6 +87,7 @@ class AppSettings:
     log_backup_count: int = 5
     log_retention_days: int = 14
     health_probe_interval: int = 60
+    automatic_health_checks: bool = False
     openai_test_url: str = "https://chatgpt.com/"
     codex_log_level: str = "info"
     ssh_debug_logging: bool = False

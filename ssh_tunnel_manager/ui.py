@@ -282,8 +282,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(900, self._install_vscode_bridge_background)
         self.health_timer = QTimer(self)
         self.health_timer.timeout.connect(self.run_health_probe)
-        self.health_timer.start(max(15, self.state.settings.health_probe_interval) * 1000)
-        if self.state.hosts:
+        self.health_timer.setInterval(max(15, self.state.settings.health_probe_interval) * 1000)
+        if self.state.settings.automatic_health_checks:
+            self.health_timer.start()
+        if self.state.hosts and self.state.settings.automatic_health_checks:
             QTimer.singleShot(900, self.run_health_probe)
         pending = self.store.load_runtime().get("pending_update", {})
         if pending.get("resume_hosts"):
@@ -829,6 +831,10 @@ class MainWindow(QMainWindow):
             dialog.apply_to(self.state.settings)
             self._save_state()
             self.health_timer.setInterval(max(15, self.state.settings.health_probe_interval) * 1000)
+            if self.state.settings.automatic_health_checks:
+                self.health_timer.start()
+            else:
+                self.health_timer.stop()
             self.append_log("全局设置已保存；已运行的隧道会在下次重连时使用新设置")
             self._selection_changed(self.host_tree.currentItem(), None)
 
@@ -1160,7 +1166,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"{alias}: {message}")
         if was_connected != (state == TunnelState.CONNECTED.value):
             QTimer.singleShot(0, self.refresh_hosts)
-            if host and host.alias == alias:
+            if host and host.alias == alias and self.state.settings.automatic_health_checks:
                 QTimer.singleShot(500, self.run_health_probe)
 
     def _set_badge(self, state: str, text: str | None = None) -> None:
