@@ -24,6 +24,13 @@ QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item { border: none; margin: 2px 8px; border-radius: 8px; }
 QListWidget::item:selected { background: #dceee5; }
 QListWidget::item:hover:!selected { background: #e7e9eb; }
+QTreeWidget { background: transparent; border: none; outline: none; }
+QTreeWidget::item { border: none; padding: 3px 5px; margin: 1px 2px; border-radius: 7px; }
+QTreeWidget::item:selected { background: #dceee5; }
+QTreeWidget::item:hover:!selected { background: #e7e9eb; }
+QTreeWidget::branch { background: transparent; }
+QListWidget#workspaceHistory { background: #f7f8fa; border: 1px solid #e2e5e8; border-radius: 8px; padding: 3px; }
+QListWidget#workspaceHistory::item { margin: 1px; padding: 5px 7px; }
 QPlainTextEdit { background: #20242a; color: #d7dce2; border: none; border-radius: 9px; padding: 9px; font-family: Consolas; font-size: 12px; }
 QCheckBox { spacing: 7px; }
 QCheckBox::indicator { width: 16px; height: 16px; }

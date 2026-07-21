@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import threading
+import json
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QSpinBox, QStyle, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSpinBox, QStyle, QVBoxLayout, QWidget,
 )
 
 from .actions import HostActions, RemoteDirectoryListing
-from .models import AppSettings, HostConfig
+from .models import AppSettings, HostConfig, utc_now
 from .ssh_config import SshHostEntry
 
 
@@ -20,6 +21,7 @@ class HostDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("编辑主机" if host else "添加主机")
         self.setMinimumWidth(520)
+        self._host = host
         self._workspaces = list(host.workspaces) if host else []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
@@ -133,10 +135,15 @@ class HostDialog(QDialog):
         alias = self.alias.text().strip()
         return HostConfig(
             alias=alias, display_name=self.display_name.text().strip() or alias,
+            id=self._host.id if self._host else "",
             enabled=self.auto_start.isChecked(), remote_proxy_port=self.remote_port.value(),
             remote_dir=self.remote_dir.text().strip() or "~",
             workspaces=list(host_path for host_path in getattr(self, "_workspaces", [])),
             auto_reconnect=self.auto_reconnect.isChecked(),
+            source=self._host.source if self._host else "user_created",
+            created_at=self._host.created_at if self._host else utc_now(),
+            updated_at=utc_now(),
+            extra=dict(self._host.extra) if self._host else {},
         )
 
     def ssh_entry(self) -> SshHostEntry | None:
@@ -165,6 +172,7 @@ class RemoteFolderDialog(QDialog):
         self.actions = actions
         self.current_path = host.remote_dir or "~"
         self.parent_path = self.current_path
+        self._selected_history_path = ""
         self._request_id = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
@@ -175,6 +183,28 @@ class RemoteFolderDialog(QDialog):
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        history_title = QLabel(f"最近打开的工作区（{len(host.workspaces)}）")
+        history_title.setObjectName("sectionTitle")
+        layout.addWidget(history_title)
+        self.history_list = QListWidget()
+        self.history_list.setObjectName("workspaceHistory")
+        self.history_list.setMaximumHeight(116)
+        self.history_list.setSpacing(1)
+        folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirLinkIcon)
+        if host.workspaces:
+            for path in host.workspaces:
+                item = QListWidgetItem(folder_icon, path)
+                item.setData(Qt.ItemDataRole.UserRole, path)
+                item.setToolTip(f"单击选择；双击直接打开\n{path}")
+                self.history_list.addItem(item)
+        else:
+            empty = QListWidgetItem("暂无历史记录，成功打开后会自动保存在这里")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.history_list.addItem(empty)
+        self.history_list.itemClicked.connect(self._select_history_item)
+        self.history_list.itemDoubleClicked.connect(self._open_history_item)
+        layout.addWidget(self.history_list)
 
         navigation = QHBoxLayout()
         self.up_button = QPushButton("上一级")
@@ -201,6 +231,7 @@ class RemoteFolderDialog(QDialog):
         self.directory_list.setAlternatingRowColors(False)
         self.directory_list.setSpacing(2)
         self.directory_list.itemDoubleClicked.connect(self._enter_item)
+        self.directory_list.itemSelectionChanged.connect(self._directory_selected)
         layout.addWidget(self.directory_list, 1)
         self.status = QLabel("正在读取远程目录…")
         self.status.setObjectName("muted")
@@ -231,6 +262,8 @@ class RemoteFolderDialog(QDialog):
 
     def load_path(self, path: str) -> None:
         path = path.strip() or "~"
+        self._selected_history_path = ""
+        self.history_list.clearSelection()
         self._request_id += 1
         request_id = self._request_id
         self.status.setText(f"正在读取 {path} …")
@@ -276,6 +309,26 @@ class RemoteFolderDialog(QDialog):
         if path:
             self.load_path(path)
 
+    def _select_history_item(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        self._selected_history_path = path
+        self.directory_list.clearSelection()
+        self.location.setCurrentText(path)
+        self.status.setText(f"已选择历史工作区：{path}")
+
+    def _open_history_item(self, item: QListWidgetItem) -> None:
+        self._select_history_item(item)
+        if self._selected_history_path:
+            super().accept()
+
+    def _directory_selected(self) -> None:
+        if not self.directory_list.selectedItems():
+            return
+        self._selected_history_path = ""
+        self.history_list.clearSelection()
+
     def accept(self) -> None:
         if not self.path():
             self.location.setFocus()
@@ -283,8 +336,11 @@ class RemoteFolderDialog(QDialog):
         super().accept()
 
     def path(self) -> str:
-        selected = self.directory_list.currentItem()
-        if selected:
+        if self._selected_history_path:
+            return self._selected_history_path
+        selected_items = self.directory_list.selectedItems()
+        if selected_items:
+            selected = selected_items[0]
             return selected.data(Qt.ItemDataRole.UserRole) or self.current_path
         return self.current_path
 
@@ -310,6 +366,23 @@ class SettingsDialog(QDialog):
         self.keepalive = self._spin(settings.keepalive_interval, 5, 300)
         self.keepalive_count = self._spin(settings.keepalive_count_max, 1, 10)
         self.smoke_timeout = self._spin(settings.smoke_timeout, 10, 180)
+        self.health_interval = self._spin(settings.health_probe_interval, 15, 3600)
+        self.log_level = QComboBox()
+        self.log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        self.log_level.setCurrentText(settings.log_level.upper())
+        self.log_retention = self._spin(settings.log_retention_days, 1, 365)
+        self.codex_log_level = QComboBox()
+        self.codex_log_level.addItems(["warn", "info", "debug", "trace"])
+        self.codex_log_level.setCurrentText(settings.codex_log_level.lower())
+        self.ssh_debug = QCheckBox("诊断模式记录 SSH -vv 输出")
+        self.ssh_debug.setChecked(settings.ssh_debug_logging)
+        self.clash_controller = QLineEdit(settings.clash_controller_url)
+        self.clash_controller.setPlaceholderText("可选，例如 http://127.0.0.1:9090")
+        self.clash_secret = QLineEdit(settings.clash_controller_secret)
+        self.clash_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.clash_secret.setPlaceholderText("可选；日志和诊断包不会记录此值")
+        self.check_updates = QCheckBox("启动时检查 GitHub Release 更新")
+        self.check_updates.setChecked(settings.check_updates_on_launch)
         self.minimize_tray = QCheckBox("关闭窗口时最小化到系统托盘")
         self.minimize_tray.setChecked(settings.minimize_to_tray)
         form.addRow("SSH 程序", ssh_holder)
@@ -321,6 +394,14 @@ class SettingsDialog(QDialog):
         form.addRow("保活间隔（秒）", self.keepalive)
         form.addRow("失联判定次数", self.keepalive_count)
         form.addRow("Codex 测试上限（秒）", self.smoke_timeout)
+        form.addRow("链路检测间隔（秒）", self.health_interval)
+        form.addRow("应用日志级别", self.log_level)
+        form.addRow("日志保留天数", self.log_retention)
+        form.addRow("Codex 日志级别", self.codex_log_level)
+        form.addRow("Clash Controller", self.clash_controller)
+        form.addRow("Clash Secret", self.clash_secret)
+        form.addRow("", self.ssh_debug)
+        form.addRow("", self.check_updates)
         form.addRow("", self.minimize_tray)
         layout.addLayout(form)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
@@ -361,4 +442,137 @@ class SettingsDialog(QDialog):
         settings.keepalive_interval = self.keepalive.value()
         settings.keepalive_count_max = self.keepalive_count.value()
         settings.smoke_timeout = self.smoke_timeout.value()
+        settings.health_probe_interval = self.health_interval.value()
+        settings.log_level = self.log_level.currentText()
+        settings.log_retention_days = self.log_retention.value()
+        settings.codex_log_level = self.codex_log_level.currentText()
+        settings.ssh_debug_logging = self.ssh_debug.isChecked()
+        settings.clash_controller_url = self.clash_controller.text().strip()
+        settings.clash_controller_secret = self.clash_secret.text()
+        settings.check_updates_on_launch = self.check_updates.isChecked()
         settings.minimize_to_tray = self.minimize_tray.isChecked()
+
+
+class TextViewerDialog(QDialog):
+    def __init__(self, title: str, text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(900, 620)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        search = QLineEdit()
+        search.setPlaceholderText("在当前日志中搜索")
+        layout.addWidget(search)
+        self.viewer = QPlainTextEdit()
+        self.viewer.setReadOnly(True)
+        self.viewer.setPlainText(text)
+        layout.addWidget(self.viewer, 1)
+        search.returnPressed.connect(lambda: self.viewer.find(search.text()))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class StructuredLogDialog(QDialog):
+    def __init__(self, log_dir: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.log_dir = log_dir
+        self.records: list[dict] = []
+        self.setWindowTitle("持久日志")
+        self.resize(1050, 680)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        heading = QLabel(f"持久日志 · {log_dir}")
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        filters = QHBoxLayout()
+        self.level = QComboBox()
+        self.component = QComboBox()
+        self.host = QComboBox()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索事件、消息和详细信息")
+        for combo, label in [
+            (self.level, "全部级别"), (self.component, "全部组件"), (self.host, "全部主机")
+        ]:
+            combo.addItem(label, "")
+        filters.addWidget(self.level)
+        filters.addWidget(self.component)
+        filters.addWidget(self.host)
+        filters.addWidget(self.search, 1)
+        layout.addLayout(filters)
+        self.viewer = QPlainTextEdit()
+        self.viewer.setReadOnly(True)
+        layout.addWidget(self.viewer, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        refresh = buttons.addButton("刷新", QDialogButtonBox.ButtonRole.ActionRole)
+        refresh.clicked.connect(self.reload)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.level.currentIndexChanged.connect(self.apply_filters)
+        self.component.currentIndexChanged.connect(self.apply_filters)
+        self.host.currentIndexChanged.connect(self.apply_filters)
+        self.search.textChanged.connect(self.apply_filters)
+        self.reload()
+
+    def reload(self) -> None:
+        self.records.clear()
+        paths = sorted(self.log_dir.glob("events.jsonl*"), key=lambda path: path.stat().st_mtime)
+        for path in paths:
+            try:
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict):
+                        self.records.append(value)
+            except OSError:
+                continue
+        self.records = self.records[-10_000:]
+        levels = sorted({str(item.get("level", "")) for item in self.records if item.get("level")})
+        components = sorted({str(item.get("logger", "")) for item in self.records if item.get("logger")})
+        hosts = sorted({str(item.get("host", "")) for item in self.records if item.get("host")})
+        self._replace_choices(self.level, "全部级别", levels)
+        self._replace_choices(self.component, "全部组件", components)
+        self._replace_choices(self.host, "全部主机", hosts)
+        self.apply_filters()
+
+    @staticmethod
+    def _replace_choices(combo: QComboBox, all_label: str, values: list[str]) -> None:
+        selected = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(all_label, "")
+        for value in values:
+            combo.addItem(value, value)
+        index = combo.findData(selected)
+        combo.setCurrentIndex(max(0, index))
+        combo.blockSignals(False)
+
+    def apply_filters(self) -> None:
+        level = str(self.level.currentData() or "")
+        component = str(self.component.currentData() or "")
+        host = str(self.host.currentData() or "")
+        needle = self.search.text().strip().casefold()
+        lines: list[str] = []
+        for item in self.records:
+            if level and item.get("level") != level:
+                continue
+            if component and item.get("logger") != component:
+                continue
+            if host and item.get("host") != host:
+                continue
+            raw = json.dumps(item, ensure_ascii=False)
+            if needle and needle not in raw.casefold():
+                continue
+            event = item.get("event") or item.get("message") or "event"
+            prefix = f"{item.get('time', '')} {str(item.get('level', '')).upper():7} {event}"
+            details = {
+                key: value for key, value in item.items()
+                if key not in {"time", "level", "event", "message", "session_id"}
+            }
+            lines.append(prefix + ("  " + json.dumps(details, ensure_ascii=False) if details else ""))
+        self.viewer.setPlainText("\n".join(lines) if lines else "没有符合筛选条件的日志。")

@@ -28,10 +28,15 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python app.py --self-test
+          python app.py --ui-self-test
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --yes --no-progress
 
       - name: Build Windows executable
         shell: powershell
-        run: .\build.ps1
+        run: .\build.ps1 -BuildInstaller
 
       - name: Publish GitHub Release
         shell: powershell
@@ -41,15 +46,25 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
           $attempts = 6
+          $releaseAssets = @(
+            Get-ChildItem dist -File | Where-Object {
+              $_.Name -like "SshTunnelManager-Setup-*.exe" -or
+              $_.Name -like "SshTunnelManager-Portable-*.exe" -or
+              $_.Name -eq "SHA256SUMS.txt"
+            } | ForEach-Object FullName
+          )
+          if ($releaseAssets.Count -ne 3) {
+            throw "Expected installer, portable executable, and SHA256SUMS.txt."
+          }
           for ($attempt = 1; $attempt -le $attempts; $attempt++) {
             Write-Host "Release attempt $attempt of $attempts"
 
             gh release view $env:GITHUB_REF_NAME *> $null
             if ($LASTEXITCODE -eq 0) {
-              gh release upload $env:GITHUB_REF_NAME dist/SshTunnelManager.exe --clobber
+              gh release upload $env:GITHUB_REF_NAME $releaseAssets --clobber
             }
             else {
-              gh release create $env:GITHUB_REF_NAME dist/SshTunnelManager.exe `
+              gh release create $env:GITHUB_REF_NAME $releaseAssets `
                 --verify-tag `
                 --generate-notes `
                 --title "SSH Tunnel Manager $env:GITHUB_REF_NAME"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 
 def self_test() -> int:
@@ -21,9 +23,53 @@ def self_test() -> int:
     return 0
 
 
+def ui_self_test() -> int:
+    previous = {key: os.environ.get(key) for key in ("APPDATA", "LOCALAPPDATA", "QT_QPA_PLATFORM")}
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            os.environ["APPDATA"] = folder
+            os.environ["LOCALAPPDATA"] = folder
+            os.environ["QT_QPA_PLATFORM"] = "offscreen"
+            from PyQt6.QtWidgets import QApplication
+            from ssh_tunnel_manager.models import AppState, HostConfig
+            from ssh_tunnel_manager.store import StateStore
+            from ssh_tunnel_manager.ui import MainWindow
+
+            first = HostConfig(
+                alias="example-a", remote_dir="/workspace/default",
+                workspaces=["/workspace/recent"],
+            )
+            second = HostConfig(alias="example-b")
+            StateStore().save(AppState(hosts=[first, second], onboarding_completed=True))
+            app = QApplication([])
+            window = MainWindow()
+            window._health_running.update(host.id for host in window.state.hosts)
+            app.processEvents()
+            assert window.host_tree.topLevelItemCount() == 2
+            assert window.host_tree.topLevelItem(0).childCount() == 2
+            window._hosts_reordered([second.id, first.id])
+            assert [host.id for host in window.state.hosts] == [second.id, first.id]
+            assert window.pool.waitForDone(30_000)
+            app.processEvents()
+            assert window.pool.waitForDone(30_000)
+            app.processEvents()
+            window._really_quit = True
+            window.close()
+            app.processEvents()
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print("UI_SELF_TEST_OK")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="SSH 隧道助手")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--ui-self-test", action="store_true")
     parser.add_argument(
         "--start-enabled", action="store_true",
         help="start all hosts marked as enabled for this launch",
@@ -31,6 +77,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         return self_test()
+    if args.ui_self_test:
+        return ui_self_test()
 
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication

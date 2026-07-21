@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import json
+import logging
 import os
 import shlex
 import socket
 import subprocess
+import urllib.error
+import urllib.request
 
 from .models import AppSettings, HostConfig, find_vscode_path
 from .ssh_config import upsert_proxy_setenv
+from .logging_system import log_event
 from .vscode_bridge import ensure_extension_installed, update_proxy_map
+
+
+logger = logging.getLogger("ssh_tunnel_manager.actions")
 
 
 @dataclass
@@ -134,7 +142,12 @@ class HostActions:
         detail = (connect_line or http_lines[0]) if ok else (
             result.stderr.strip() or result.stdout.strip() or f"curl 退出码 {result.returncode}"
         )
-        return ActionResult(ok, "本地代理正常" if ok else "本地代理不可用", detail)
+        result_value = ActionResult(ok, "本地代理正常" if ok else "本地代理不可用", detail)
+        log_event(
+            logger, logging.INFO if ok else logging.WARNING, "probe.local_proxy",
+            ok=ok, proxy=proxy, detail=detail,
+        )
+        return result_value
 
     def test_ssh(self, host: HostConfig) -> ActionResult:
         try:
@@ -160,6 +173,76 @@ class HostActions:
         detail = first_line[0] if first_line else result.stderr.strip()
         ok = result.returncode == 0 and detail.startswith("HTTP/")
         return ActionResult(ok, "远程代理正常" if ok else "远程代理测试失败", detail)
+
+    def test_remote_port(self, host: HostConfig) -> ActionResult:
+        port = int(host.remote_proxy_port)
+        script = (
+            "import socket,sys; "
+            f"s=socket.create_connection(('127.0.0.1',{port}),5); "
+            "s.close(); print('REMOTE_PORT_OK')"
+        )
+        remote = "python3 -c " + shlex.quote(script)
+        try:
+            result = self._run(self._ssh(host.alias, remote), self.settings.connect_timeout + 8)
+        except Exception as exc:
+            return ActionResult(False, "远程端口不可用", str(exc))
+        ok = result.returncode == 0 and "REMOTE_PORT_OK" in result.stdout
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
+        return ActionResult(ok, "远程端口正常" if ok else "远程端口不可用", detail)
+
+    def test_openai_chain(self, host: HostConfig) -> ActionResult:
+        port = int(host.remote_proxy_port)
+        url = shlex.quote(self.settings.openai_test_url)
+        remote = (
+            f"curl -sS -o /dev/null --max-time 25 -x http://127.0.0.1:{port} "
+            "-w 'OPENAI_HTTP=%{http_code} CONNECT=%{time_connect} TLS=%{time_appconnect} TOTAL=%{time_total}' "
+            f"{url}"
+        )
+        try:
+            result = self._run(self._ssh(host.alias, remote), 32)
+        except Exception as exc:
+            return ActionResult(False, "OpenAI 链路检测失败", str(exc))
+        metrics = result.stdout.strip()
+        error = result.stderr.strip()
+        detail = metrics or error
+        if result.returncode != 0:
+            detail = f"{detail} CURL_EXIT={result.returncode}".strip()
+            if error and error not in detail:
+                detail += f" ERROR={error}"
+        ok = result.returncode == 0 and "OPENAI_HTTP=" in detail and "OPENAI_HTTP=000" not in detail
+        return ActionResult(ok, "OpenAI 链路正常" if ok else "OpenAI 链路检测失败", detail)
+
+    def test_codex_available(self, host: HostConfig) -> ActionResult:
+        remote = "bash -lic " + shlex.quote(
+            "command -v codex >/dev/null 2>&1 && codex --version || exit 127"
+        )
+        try:
+            result = self._run(self._ssh(host.alias, remote), self.settings.connect_timeout + 10)
+        except Exception as exc:
+            return ActionResult(False, "Codex 检测失败", str(exc))
+        ok = result.returncode == 0 and bool(result.stdout.strip())
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or "远程未找到 codex")
+        return ActionResult(ok, "Codex 可用" if ok else "Codex 不可用", detail)
+
+    def test_clash_controller(self) -> ActionResult:
+        base = self.settings.clash_controller_url.strip().rstrip("/")
+        if not base:
+            return ActionResult(False, "未配置 Clash Controller", "在设置中填写 Controller 地址后可显示节点")
+        request = urllib.request.Request(base + "/proxies")
+        if self.settings.clash_controller_secret:
+            request.add_header("Authorization", f"Bearer {self.settings.clash_controller_secret}")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            proxies = payload.get("proxies", {}) if isinstance(payload, dict) else {}
+            selected: list[str] = []
+            for name, value in proxies.items():
+                if isinstance(value, dict) and value.get("now"):
+                    selected.append(f"{name} → {value['now']}")
+            detail = "；".join(selected[:4]) or f"Controller 正常，共 {len(proxies)} 个代理项"
+            return ActionResult(True, "Clash Controller 正常", detail)
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            return ActionResult(False, "Clash Controller 不可用", str(exc))
 
     def list_remote_directories(self, host: HostConfig, path: str) -> RemoteDirectoryListing:
         script = r'''import json
@@ -289,6 +372,7 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
              "-o", "ClearAllForwardings=yes", "-t", host.alias, remote],
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
+        log_event(logger, logging.INFO, "launch.terminal", host=host.alias, host_id=host.id)
 
     def launch_vscode(self, host: HostConfig) -> None:
         executable = self.settings.vscode_path or find_vscode_path()
@@ -317,12 +401,77 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
             command,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        log_event(
+            logger, logging.INFO, "launch.vscode",
+            host=host.alias, host_id=host.id, remote_dir=host.remote_dir,
+        )
 
-    def launch_codex(self, host: HostConfig) -> None:
+    def launch_codex(self, host: HostConfig) -> str:
         exports = self._remote_proxy_exports(host.remote_proxy_port)
-        remote = "bash -lic " + shlex.quote(f"export {exports}; exec codex")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_dir = f"$HOME/.codex/log/ssh-tunnel-manager/{host.alias}/{stamp}"
+        inner = (
+            f'mkdir -p "{log_dir}"; export {exports}; '
+            f"export RUST_LOG={shlex.quote(self.settings.codex_log_level)}; "
+            f'exec codex -c log_dir="{log_dir}"'
+        )
+        remote = "bash -lic " + shlex.quote(inner)
         subprocess.Popen(
             [self.settings.ssh_path, "-F", self.settings.ssh_config_path,
              "-o", "ClearAllForwardings=yes", "-t", host.alias, remote],
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
+        log_event(
+            logger, logging.INFO, "launch.codex",
+            host=host.alias, host_id=host.id, remote_log_dir=log_dir,
+            log_level=self.settings.codex_log_level,
+        )
+        return log_dir
+
+    def latest_codex_log(self, host: HostConfig, lines: int = 300) -> ActionResult:
+        root = f"$HOME/.codex/log/ssh-tunnel-manager/{host.alias}"
+        remote = (
+            f'file=$(find "{root}" -type f -name codex-tui.log 2>/dev/null | sort | tail -n 1); '
+            f'[ -n "$file" ] || {{ echo "未找到 Codex 日志" >&2; exit 2; }}; '
+            f'echo "FILE=$file"; tail -n {max(20, min(lines, 2000))} "$file"'
+        )
+        try:
+            result = self._run(self._ssh(host.alias, remote), self.settings.connect_timeout + 15)
+        except Exception as exc:
+            return ActionResult(False, "读取 Codex 日志失败", str(exc))
+        ok = result.returncode == 0
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
+        return ActionResult(ok, "Codex 日志" if ok else "读取 Codex 日志失败", detail)
+
+    def vscode_log_directory(self) -> Path | None:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        candidates = [Path(appdata) / "Code" / "logs", Path(appdata) / "Code - Insiders" / "logs"]
+        existing = [path for path in candidates if path.is_dir()]
+        return max(existing, key=lambda path: path.stat().st_mtime) if existing else None
+
+    def open_vscode_logs(self) -> Path:
+        path = self.vscode_log_directory()
+        if not path:
+            raise FileNotFoundError("未找到 VSCode 日志目录")
+        os.startfile(path)  # type: ignore[attr-defined]
+        log_event(logger, logging.INFO, "vscode.logs_opened", path=str(path))
+        return path
+
+    def latest_remote_vscode_log(self, host: HostConfig, lines: int = 300) -> ActionResult:
+        limit = max(20, min(lines, 2000))
+        remote = (
+            "file=$(find \"$HOME\"/.vscode-server* -type f "
+            "\\( -name 'log.txt' -o -name '*.log' \\) -printf '%T@ %p\\n' 2>/dev/null "
+            "| sort -n | tail -n 1 | cut -d' ' -f2-); "
+            "[ -n \"$file\" ] || { echo '未找到 VSCode Server 日志' >&2; exit 2; }; "
+            f"echo \"FILE=$file\"; tail -n {limit} \"$file\""
+        )
+        try:
+            result = self._run(self._ssh(host.alias, remote), self.settings.connect_timeout + 15)
+        except Exception as exc:
+            return ActionResult(False, "读取 VSCode Server 日志失败", str(exc))
+        ok = result.returncode == 0
+        detail = result.stdout.strip() if ok else (result.stderr.strip() or result.stdout.strip())
+        return ActionResult(ok, "VSCode Server 日志" if ok else "读取 VSCode Server 日志失败", detail)
