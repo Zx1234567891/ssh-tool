@@ -47,6 +47,8 @@ def ui_self_test() -> int:
             app.processEvents()
             assert window.host_tree.topLevelItemCount() == 2
             assert window.host_tree.topLevelItem(0).childCount() == 2
+            assert not window.auto_health_button.isChecked()
+            assert "已关闭" in window.auto_health_button.text()
             window._hosts_reordered([second.id, first.id])
             assert [host.id for host in window.state.hosts] == [second.id, first.id]
             assert window.pool.waitForDone(30_000)

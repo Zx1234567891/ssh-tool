@@ -435,6 +435,13 @@ class MainWindow(QMainWindow):
         label.setObjectName("sectionTitle")
         test_title.addWidget(label)
         test_title.addStretch()
+        self.auto_health_button = QPushButton()
+        self.auto_health_button.setObjectName("autoHealthToggle")
+        self.auto_health_button.setCheckable(True)
+        self.auto_health_button.setChecked(self.state.settings.automatic_health_checks)
+        self._update_auto_health_button()
+        self.auto_health_button.toggled.connect(self._automatic_health_toggled)
+        test_title.addWidget(self.auto_health_button)
         deep = QPushButton("深度诊断")
         deep.setObjectName("primary")
         deep.clicked.connect(lambda: self.run_health_probe(show_details=True))
@@ -831,12 +838,33 @@ class MainWindow(QMainWindow):
             dialog.apply_to(self.state.settings)
             self._save_state()
             self.health_timer.setInterval(max(15, self.state.settings.health_probe_interval) * 1000)
-            if self.state.settings.automatic_health_checks:
+            if self.auto_health_button.isChecked():
                 self.health_timer.start()
             else:
                 self.health_timer.stop()
             self.append_log("全局设置已保存；已运行的隧道会在下次重连时使用新设置")
             self._selection_changed(self.host_tree.currentItem(), None)
+
+    def _update_auto_health_button(self) -> None:
+        enabled = self.auto_health_button.isChecked()
+        self.auto_health_button.setText("● 自动检测：已开启" if enabled else "○ 自动检测：已关闭")
+        self.auto_health_button.setToolTip(
+            "按设置中的链路检测间隔自动检测当前主机" if enabled
+            else "点击后立即检测当前主机，并按设定间隔自动刷新"
+        )
+
+    def _automatic_health_toggled(self, enabled: bool) -> None:
+        self.state.settings.automatic_health_checks = enabled
+        self._update_auto_health_button()
+        if enabled:
+            self.health_timer.setInterval(max(15, self.state.settings.health_probe_interval) * 1000)
+            self.health_timer.start()
+            self.append_log("自动链路检测已开启")
+            QTimer.singleShot(0, self.run_health_probe)
+        else:
+            self.health_timer.stop()
+            self.append_log("自动链路检测已关闭")
+        self._save_state()
 
     def start_selected(self) -> None:
         host = self.selected_host()

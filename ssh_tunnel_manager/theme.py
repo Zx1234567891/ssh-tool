@@ -20,6 +20,10 @@ QPushButton#ghost { background: transparent; border: none; padding: 6px; color: 
 QPushButton#settingsButton { background: #ffffff; border: 1px solid #d9dde3; border-radius: 8px; padding: 7px 11px; color: #454b54; font-weight: 600; }
 QPushButton#settingsButton:hover { background: #f7f9fa; border-color: #aeb5bf; color: #171a1d; }
 QPushButton#settingsButton:pressed { background: #edf0f2; }
+QPushButton#autoHealthToggle { color: #6d747d; background: #f3f5f6; border-color: #d7dce2; font-weight: 600; }
+QPushButton#autoHealthToggle:hover { background: #e9ecef; border-color: #b8bec6; }
+QPushButton#autoHealthToggle:checked { color: white; background: #07c160; border-color: #07c160; }
+QPushButton#autoHealthToggle:checked:hover { background: #06ad56; border-color: #06ad56; }
 QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item { border: none; margin: 2px 8px; border-radius: 8px; }
 QListWidget::item:selected { background: #dceee5; }
