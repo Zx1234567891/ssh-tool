@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import io
+import json
+import logging
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from ssh_tunnel_manager.actions import HostActions
+from ssh_tunnel_manager.diagnostics import create_diagnostic_bundle
+from ssh_tunnel_manager.health import HealthProbeService, HealthState
+from ssh_tunnel_manager.logging_system import configure_logging, log_event, shutdown_logging
 from ssh_tunnel_manager.models import (
     AppState, HostConfig, connected_hosts_first, find_vscode_path,
 )
 from ssh_tunnel_manager.ssh_config import (
     SshHostEntry, append_host_entry, parse_host_aliases, upsert_proxy_setenv,
 )
-from ssh_tunnel_manager.store import StateStore
+from ssh_tunnel_manager.store import StateStore, UnsupportedConfigVersion
 from ssh_tunnel_manager.tunnel import TunnelManager, TunnelState
+from ssh_tunnel_manager.updater import UpdateInfo, check_for_update, download_update
 
 
 class ModelTests(unittest.TestCase):
@@ -35,12 +44,69 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored.hosts[0].alias, "server-a")
         self.assertEqual(restored.hosts[0].display_name, "实验机")
         self.assertEqual(restored.hosts[0].workspaces, ["/workspace/a"])
+        self.assertEqual(restored.hosts[0].id, original.hosts[0].id)
+
+    def test_workspace_history_is_recent_unique_and_bounded(self) -> None:
+        host = HostConfig(
+            alias="server-a", remote_dir="/workspace/default",
+            workspaces=["/workspace/old", "/workspace/old", ""],
+        )
+        host.remember_workspace("/workspace/new", limit=2)
+        host.remember_workspace("/workspace/old", limit=2)
+        self.assertEqual(host.workspaces, ["/workspace/old", "/workspace/new"])
+        self.assertEqual(
+            host.workspace_shortcuts(),
+            ["/workspace/default", "/workspace/old", "/workspace/new"],
+        )
+        host.forget_workspace("/workspace/old")
+        self.assertEqual(host.workspaces, ["/workspace/new"])
+
+    def test_unknown_fields_survive_round_trip(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "future_root": {"enabled": True},
+            "settings": {"future_setting": 42},
+            "hosts": [{"alias": "server", "future_host": "kept"}],
+        }
+        restored = AppState.from_dict(payload).to_dict()
+        self.assertEqual(restored["future_root"], {"enabled": True})
+        self.assertEqual(restored["settings"]["future_setting"], 42)
+        self.assertEqual(restored["hosts"][0]["future_host"], "kept")
 
     def test_store_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = StateStore(Path(folder))
             store.save(AppState(hosts=[HostConfig(alias="server-b")]))
             self.assertEqual(store.load().hosts[0].alias, "server-b")
+
+    def test_store_migrates_v1_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            root.mkdir(exist_ok=True)
+            (root / "config.json").write_text(
+                json.dumps({"version": 1, "settings": {}, "hosts": [{"alias": "old"}]}),
+                encoding="utf-8",
+            )
+            store = StateStore(root)
+            state = store.load()
+            self.assertTrue(state.onboarding_completed)
+            self.assertEqual(state.hosts[0].source, "migration")
+            self.assertTrue(state.hosts[0].id)
+            migrated = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(len(list((root / "backups").glob("config-v1-*.json"))), 1)
+
+    def test_higher_schema_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "config.json").write_text(
+                json.dumps({"schema_version": 99, "hosts": []}), encoding="utf-8"
+            )
+            store = StateStore(root)
+            state = store.load()
+            self.assertTrue(store.read_only)
+            with self.assertRaises(UnsupportedConfigVersion):
+                store.save(state)
 
     def test_vscode_path_is_detected_on_developer_machine(self) -> None:
         detected = find_vscode_path()
@@ -223,6 +289,8 @@ class ActionTests(unittest.TestCase):
             codex_command = popen.call_args.args[0]
         self.assertIn("http_proxy=http://127.0.0.1:10098", terminal_command[-1])
         self.assertIn("http_proxy=http://127.0.0.1:10098", codex_command[-1])
+        self.assertIn("RUST_LOG=info", codex_command[-1])
+        self.assertIn("log_dir=", codex_command[-1])
 
     def test_remote_directory_listing_is_parsed(self) -> None:
         state = AppState()
@@ -236,6 +304,107 @@ class ActionTests(unittest.TestCase):
             listing = actions.list_remote_directories(HostConfig(alias="server-a"), "~")
         self.assertEqual(listing.path, "/home/demo")
         self.assertEqual(listing.directories, [("project", "/home/demo/project")])
+
+    def test_openai_probe_keeps_curl_error_details(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        failed = subprocess.CompletedProcess(
+            args=[], returncode=35,
+            stdout="OPENAI_HTTP=000 CONNECT=0.0002 TLS=0.0000 TOTAL=0.50",
+            stderr="curl: (35) OpenSSL SSL_connect: Connection reset by peer",
+        )
+        with patch.object(actions, "_run", return_value=failed):
+            result = actions.test_openai_chain(HostConfig(alias="server-a"))
+        self.assertFalse(result.ok)
+        self.assertIn("CURL_EXIT=35", result.detail)
+        self.assertIn("Connection reset by peer", result.detail)
+
+
+class ObservabilityTests(unittest.TestCase):
+    def test_logs_are_persisted_and_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            settings = AppState().settings
+            settings.log_level = "DEBUG"
+            configure_logging(Path(folder), settings)
+            logger = logging.getLogger("ssh_tunnel_manager.test")
+            log_event(
+                logger, logging.WARNING, "test.secret",
+                authorization="Bearer abc123", detail="password=hunter2",
+            )
+            shutdown_logging()
+            readable = (Path(folder) / "app.log").read_text(encoding="utf-8")
+            structured = (Path(folder) / "events.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("abc123", structured)
+            self.assertNotIn("hunter2", readable + structured)
+            self.assertIn("<redacted>", structured)
+
+    def test_openai_is_not_probed_when_local_proxy_fails(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        service = HealthProbeService(actions)
+        host = HostConfig(alias="server")
+        with (
+            patch.object(actions, "test_local_proxy", return_value=type("R", (), {
+                "ok": False, "title": "本地代理失败", "detail": "refused"
+            })()),
+            patch.object(actions, "test_codex_available", return_value=type("R", (), {
+                "ok": True, "title": "Codex 可用", "detail": "codex 1"
+            })()),
+            patch.object(actions, "test_remote_port", return_value=type("R", (), {
+                "ok": True, "title": "远程端口正常", "detail": "ok"
+            })()),
+            patch.object(actions, "test_openai_chain") as openai,
+        ):
+            snapshot = service.run_full(host, "connected")
+        self.assertEqual(snapshot.nodes["local_proxy"].state, HealthState.FAILED)
+        self.assertEqual(snapshot.nodes["openai"].state, HealthState.UNKNOWN)
+        openai.assert_not_called()
+
+    def test_diagnostic_bundle_redacts_clash_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = StateStore(Path(folder))
+            state = AppState()
+            state.settings.clash_controller_secret = "very-secret-value"
+            path = create_diagnostic_bundle(store, state, {})
+            with zipfile.ZipFile(path) as archive:
+                config = archive.read("config-sanitized.json").decode("utf-8")
+            self.assertNotIn("very-secret-value", config)
+            self.assertIn("<redacted>", config)
+
+
+class UpdateTests(unittest.TestCase):
+    def test_latest_release_selects_setup_asset(self) -> None:
+        payload = {
+            "tag_name": "v1.7.0", "name": "1.7", "body": "changes",
+            "html_url": "https://example.test/release",
+            "assets": [{
+                "name": "SshTunnelManager-Setup-1.7.0.exe",
+                "browser_download_url": "https://example.test/setup.exe",
+                "digest": "sha256:" + "a" * 64,
+            }],
+        }
+        with patch(
+            "ssh_tunnel_manager.updater.urllib.request.urlopen",
+            return_value=io.BytesIO(json.dumps(payload).encode("utf-8")),
+        ):
+            info = check_for_update("owner/repo", "1.6.0")
+        self.assertIsNotNone(info)
+        self.assertEqual(info.version, "1.7.0")
+        self.assertEqual(info.sha256, "a" * 64)
+
+    def test_download_verifies_sha256(self) -> None:
+        content = b"installer-content"
+        info = UpdateInfo(
+            version="1.7.0", name="1.7", notes="", page_url="",
+            asset_url="https://example.test/setup.exe", asset_name="setup.exe",
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "ssh_tunnel_manager.updater.urllib.request.urlopen",
+            return_value=io.BytesIO(content),
+        ):
+            path = download_update(info, Path(folder))
+            self.assertEqual(path.read_bytes(), content)
 
 
 if __name__ == "__main__":

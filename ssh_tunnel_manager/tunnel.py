@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from enum import Enum
+from collections import deque
 import ctypes
 import json
+import logging
 import os
 import re
 import subprocess
@@ -12,6 +15,10 @@ import time
 from typing import Callable
 
 from .models import AppSettings, HostConfig
+from .logging_system import log_event, redact
+
+
+logger = logging.getLogger("ssh_tunnel_manager.tunnel")
 
 
 class TunnelState(str, Enum):
@@ -31,6 +38,8 @@ class TunnelRuntime:
     stop_requested: bool = False
     generation: int = 0
     external_pid: int | None = None
+    stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=80))
+    reconnect_count: int = 0
 
 
 class TunnelManager:
@@ -60,6 +69,12 @@ class TunnelManager:
             runtime.stop_requested = False
             runtime.state = TunnelState.CONNECTING
             runtime.message = "正在连接"
+            runtime.stderr_tail.clear()
+        log_event(
+            logger, logging.INFO, "tunnel.start_requested",
+            host=host.alias, host_id=host.id, generation=generation,
+            remote_port=host.remote_proxy_port,
+        )
         self._emit(host.alias, TunnelState.CONNECTING, "正在建立专用隧道…")
         threading.Thread(target=self._supervise, args=(host, generation), daemon=True).start()
 
@@ -76,6 +91,7 @@ class TunnelManager:
             runtime.stop_requested = True
             process = runtime.process
         if process and process.poll() is None:
+            log_event(logger, logging.INFO, "tunnel.stop_requested", host=alias, pid=process.pid)
             process.terminate()
             try:
                 process.wait(timeout=3)
@@ -86,6 +102,7 @@ class TunnelManager:
             runtime.state = TunnelState.STOPPED
             runtime.message = "已停止"
         self._emit(alias, TunnelState.STOPPED, "隧道已停止")
+        log_event(logger, logging.INFO, "tunnel.stopped", host=alias)
 
     def stop_all(self) -> None:
         for alias in list(self._items):
@@ -154,6 +171,10 @@ class TunnelManager:
                 runtime.external_pid = pid
                 runtime.state = TunnelState.CONNECTED
                 runtime.message = "由另一助手实例管理"
+                log_event(
+                    logger, logging.INFO, "tunnel.external_discovered",
+                    host=host.alias, host_id=host.id, pid=pid, forwarding=forwarding,
+                )
                 if host.alias not in discovered:
                     discovered.append(host.alias)
         return discovered
@@ -179,7 +200,7 @@ class TunnelManager:
     def _command(self, host: HostConfig) -> list[str]:
         settings = self._settings_provider()
         forwarding = f"{host.remote_proxy_port}:{settings.local_proxy_host}:{settings.local_proxy_port}"
-        return [
+        command = [
             settings.ssh_path, "-F", settings.ssh_config_path, "-NT",
             "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
             "-o", f"ConnectTimeout={settings.connect_timeout}",
@@ -187,6 +208,29 @@ class TunnelManager:
             "-o", f"ServerAliveCountMax={settings.keepalive_count_max}",
             "-R", forwarding, host.alias,
         ]
+        if settings.ssh_debug_logging:
+            command.insert(4, "-vv")
+        return command
+
+    def _read_stderr(self, host: HostConfig, runtime: TunnelRuntime, process: subprocess.Popen) -> None:
+        if not process.stderr:
+            return
+        try:
+            for raw in iter(process.stderr.readline, ""):
+                line = raw.rstrip("\r\n")
+                if not line:
+                    continue
+                with self._lock:
+                    runtime.stderr_tail.append(line)
+                log_event(
+                    logger, logging.DEBUG, "tunnel.ssh_stderr",
+                    host=host.alias, pid=process.pid, line=redact(line),
+                )
+        except (OSError, ValueError) as exc:
+            log_event(
+                logger, logging.DEBUG, "tunnel.stderr_reader_stopped",
+                host=host.alias, pid=process.pid, error=str(exc),
+            )
 
     def _supervise(self, host: HostConfig, generation: int) -> None:
         attempt = 0
@@ -205,6 +249,15 @@ class TunnelManager:
                 with self._lock:
                     runtime.process = process
                     runtime.started_at = time.time()
+                log_event(
+                    logger, logging.INFO, "tunnel.process_started",
+                    host=host.alias, host_id=host.id, pid=process.pid, generation=generation,
+                    command=" ".join(self._command(host)),
+                )
+                stderr_thread = threading.Thread(
+                    target=self._read_stderr, args=(host, runtime, process), daemon=True
+                )
+                stderr_thread.start()
                 try:
                     return_code = process.wait(timeout=1.2)
                 except subprocess.TimeoutExpired:
@@ -214,14 +267,30 @@ class TunnelManager:
                     with self._lock:
                         runtime.state = TunnelState.CONNECTED
                         runtime.message = "运行中"
+                        runtime.reconnect_count = attempt
                     self._emit(host.alias, TunnelState.CONNECTED, "隧道已连接")
+                    log_event(
+                        logger, logging.INFO, "tunnel.connected",
+                        host=host.alias, pid=process.pid, generation=generation,
+                    )
                     return_code = process.wait()
-                error = process.stderr.read().strip() if process.stderr else ""
+                stderr_thread.join(timeout=1)
+                with self._lock:
+                    error = "\n".join(runtime.stderr_tail)
                 if runtime.stop_requested or runtime.generation != generation:
                     return
                 message = error.splitlines()[-1] if error else f"SSH 已退出（{return_code}）"
+                log_event(
+                    logger, logging.WARNING, "tunnel.process_exited",
+                    host=host.alias, pid=process.pid, generation=generation,
+                    exit_code=return_code, error=message,
+                )
             except Exception as exc:
                 message = str(exc)
+                log_event(
+                    logger, logging.ERROR, "tunnel.start_failed",
+                    host=host.alias, generation=generation, error=message,
+                )
 
             with self._lock:
                 runtime.process = None
@@ -236,7 +305,13 @@ class TunnelManager:
             with self._lock:
                 runtime.state = TunnelState.RETRYING
                 runtime.message = f"{delay} 秒后重连"
+                runtime.reconnect_count += 1
             self._emit(host.alias, TunnelState.RETRYING, f"连接中断，{delay} 秒后重试：{message}")
+            log_event(
+                logger, logging.WARNING, "tunnel.retry_scheduled",
+                host=host.alias, generation=generation, delay_seconds=delay,
+                reconnect_count=runtime.reconnect_count, error=message,
+            )
             for _ in range(delay * 10):
                 if runtime.stop_requested or runtime.generation != generation:
                     return
