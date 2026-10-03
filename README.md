@@ -56,6 +56,8 @@
 - 诊断包：`%LOCALAPPDATA%\SshTunnelManager\diagnostics`
 - 更新缓存：`%LOCALAPPDATA%\SshTunnelManager\updates`
 
+安装器升级时只替换 `%LOCALAPPDATA%\Programs\SshTunnelManager` 下的程序文件；不会删除 `%APPDATA%\SshTunnelManager` 或 `%LOCALAPPDATA%\SshTunnelManager` 中的配置、日志、诊断包、端口映射和更新状态。手动卸载程序时也默认保留这些用户数据，便于重新安装后继续使用。
+
 配置使用带版本号的 schema。升级旧配置前会自动备份；如果配置来自当前程序不支持的更高版本，程序会禁止覆盖保存。日志和诊断包会对常见密码、Token、Cookie 和 Authorization 信息进行脱敏。
 
 ## 开发与打包

@@ -15,7 +15,11 @@ import urllib.request
 from .models import AppSettings, HostConfig, find_vscode_path
 from .ssh_config import upsert_proxy_setenv
 from .logging_system import log_event
-from .vscode_bridge import ensure_extension_installed, update_proxy_map
+from .vscode_bridge import (
+    ensure_extension_installed,
+    ensure_remote_ssh_download_proxy,
+    update_proxy_map,
+)
 
 
 logger = logging.getLogger("ssh_tunnel_manager.actions")
@@ -59,6 +63,18 @@ class HostActions:
     @staticmethod
     def _proxy_environment(port: int) -> dict[str, str]:
         proxy = f"http://127.0.0.1:{port}"
+        return {
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "NO_PROXY": "localhost,127.0.0.1,::1",
+            "no_proxy": "localhost,127.0.0.1,::1",
+        }
+
+    @staticmethod
+    def _local_proxy_environment(host: str, port: int) -> dict[str, str]:
+        proxy = f"http://{host}:{port}"
         return {
             "http_proxy": proxy,
             "https_proxy": proxy,
@@ -148,6 +164,43 @@ class HostActions:
             ok=ok, proxy=proxy, detail=detail,
         )
         return result_value
+
+    def test_vscode_server_download(self) -> ActionResult:
+        settings = self.settings
+        proxy = f"http://{settings.local_proxy_host}:{settings.local_proxy_port}"
+        try:
+            result = self._run(
+                [
+                    "curl.exe", "-sSIL", "--max-time", "18", "--ssl-no-revoke",
+                    "-x", proxy, settings.proxy_test_url,
+                ],
+                24,
+            )
+        except FileNotFoundError:
+            return ActionResult(False, "VSCode Server 下载检测失败", "系统未找到 curl.exe")
+        except Exception as exc:
+            return ActionResult(False, "VSCode Server 下载检测失败", str(exc))
+        http_lines = [line.strip() for line in result.stdout.splitlines() if line.startswith("HTTP/")]
+        final_http = next(
+            (line for line in reversed(http_lines) if "Connection established" not in line),
+            "",
+        )
+        ok = result.returncode == 0 and bool(final_http)
+        if ok:
+            detail = final_http
+        else:
+            detail = result.stderr.strip() or result.stdout.strip() or f"curl 退出码 {result.returncode}"
+            if http_lines and all("Connection established" in line for line in http_lines):
+                detail = f"代理 CONNECT 成功，但 VSCode 下载 TLS/HTTP 失败：{detail}"
+        log_event(
+            logger, logging.INFO if ok else logging.WARNING, "probe.vscode_server_download",
+            ok=ok, proxy=proxy, detail=detail,
+        )
+        return ActionResult(
+            ok,
+            "VSCode Server 下载正常" if ok else "VSCode Server 下载失败",
+            detail,
+        )
 
     def test_ssh(self, host: HostConfig) -> ActionResult:
         try:
@@ -389,6 +442,18 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
         installed, detail = ensure_extension_installed(path)
         if not installed:
             raise RuntimeError(f"VSCode 配套组件安装失败：{detail}")
+        proxy_environment = self._local_proxy_environment(
+            self.settings.local_proxy_host, self.settings.local_proxy_port
+        )
+        proxy_url = proxy_environment["HTTP_PROXY"]
+        proxy_configured, proxy_detail = ensure_remote_ssh_download_proxy(path, proxy_url)
+        log_event(
+            logger,
+            logging.INFO if proxy_configured else logging.WARNING,
+            "vscode.remote_ssh_download_proxy",
+            ok=proxy_configured,
+            detail=proxy_detail,
+        )
         arguments = [
             "--new-window",
             "--remote", f"ssh-remote+{host.alias}", host.remote_dir,
@@ -397,8 +462,11 @@ printf 'CONFIG_OK backup=%s\n' "$file.ssh-tunnel-manager-backup-$stamp"
             command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(path), *arguments]
         else:
             command = [str(path), *arguments]
+        environment = os.environ.copy()
+        environment.update(proxy_environment)
         subprocess.Popen(
             command,
+            env=environment,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         log_event(

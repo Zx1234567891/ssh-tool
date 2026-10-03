@@ -27,6 +27,7 @@ HEALTH_NODE_LABELS = {
     "remote_port": "远程端口",
     "ssh_tunnel": "SSH 隧道",
     "local_proxy": "本机 Clash",
+    "vscode_server": "VSCode 下载",
     "clash_node": "Clash 节点",
     "openai": "OpenAI",
 }
@@ -177,6 +178,16 @@ class HealthProbeService:
             ))
 
         local_ok = snapshot.nodes["local_proxy"].state == HealthState.HEALTHY
+        if local_ok:
+            snapshot.nodes["vscode_server"] = self._probe(
+                host, "vscode_server", self.actions.test_vscode_server_download
+            )
+        else:
+            snapshot.nodes["vscode_server"] = self._record(host, HealthNodeResult(
+                "vscode_server", HealthState.UNKNOWN, "VSCode 下载未检测",
+                "本机代理异常", checked_at=_now(),
+            ))
+
         remote_ok = snapshot.nodes["remote_port"].state == HealthState.HEALTHY
         if local_ok and remote_ok:
             snapshot.nodes["openai"] = self._probe(
