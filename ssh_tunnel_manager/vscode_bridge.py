@@ -17,10 +17,68 @@ from .store import default_data_dir
 EXTENSION_ID = "elpco.ssh-tunnel-manager-env"
 EXTENSION_VERSION = "1.0.1"
 _INSTALL_LOCK = threading.Lock()
+REMOTE_SSH_PROXY_KEYS = ("remote.SSH.httpProxy", "remote.SSH.httpsProxy")
 
 
 def proxy_map_path() -> Path:
     return default_data_dir() / "vscode-proxy-map.json"
+
+
+def vscode_user_settings_path(executable: Path) -> Path:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        raise RuntimeError("APPDATA is not set")
+    product = "Code - Insiders" if "insiders" in executable.name.lower() else "Code"
+    return Path(appdata) / product / "User" / "settings.json"
+
+
+def ensure_remote_ssh_download_proxy(
+    executable: Path, proxy_url: str, local_server_download: str = "always"
+) -> tuple[bool, str]:
+    """Configure Remote-SSH's bootstrap download path to use the local proxy."""
+    try:
+        path = vscode_user_settings_path(executable)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict = {}
+        text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+        if text.strip():
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                return False, f"VS Code settings root is not an object: {path}"
+
+        changed = False
+        for key in REMOTE_SSH_PROXY_KEYS:
+            current = payload.get(key)
+            if current in (None, ""):
+                value: dict[str, str] = {}
+            elif isinstance(current, dict):
+                value = dict(current)
+            else:
+                return False, f"Unsupported {key} value in {path}"
+            if value.get("*") != proxy_url:
+                value["*"] = proxy_url
+                changed = True
+            payload[key] = value
+
+        if payload.get("remote.SSH.localServerDownload") != local_server_download:
+            payload["remote.SSH.localServerDownload"] = local_server_download
+            changed = True
+
+        if not changed:
+            return True, f"Remote-SSH download proxy already set: {proxy_url}"
+
+        fd, temporary_name = tempfile.mkstemp(prefix="settings-", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=4)
+                handle.write("\n")
+            os.replace(temporary_name, path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+        return True, f"Remote-SSH download proxy set to {proxy_url}"
+    except (OSError, json.JSONDecodeError, RuntimeError) as exc:
+        return False, str(exc)
 
 
 def update_proxy_map(host: HostConfig) -> Path:

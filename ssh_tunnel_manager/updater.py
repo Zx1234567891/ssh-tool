@@ -13,6 +13,11 @@ from .logging_system import log_event
 
 
 logger = logging.getLogger("ssh_tunnel_manager.updater")
+INSTALLER_UPGRADE_ARGS = (
+    "/NORESTART",
+    "/CLOSEAPPLICATIONS",
+    "/SUPPRESSMSGBOXES",
+)
 
 
 @dataclass(slots=True)
@@ -118,6 +123,10 @@ def download_update(info: UpdateInfo, update_dir: Path, timeout: int = 120) -> P
     return target
 
 
+def installer_upgrade_command(path: Path) -> list[str]:
+    return [str(path), *INSTALLER_UPGRADE_ARGS]
+
+
 def launch_installer(path: Path) -> None:
-    subprocess.Popen([str(path), "/NORESTART"], close_fds=True)
+    subprocess.Popen(installer_upgrade_command(path), close_fds=True)
     log_event(logger, logging.INFO, "update.installer_started", path=str(path))

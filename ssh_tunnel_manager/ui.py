@@ -102,7 +102,10 @@ class HealthNodeWidget(QFrame):
 
 
 class HealthChainWidget(QFrame):
-    NODE_ORDER = ["codex", "remote_port", "ssh_tunnel", "local_proxy", "clash_node", "openai"]
+    NODE_ORDER = [
+        "codex", "remote_port", "ssh_tunnel", "local_proxy",
+        "vscode_server", "clash_node", "openai",
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -1053,7 +1056,7 @@ class MainWindow(QMainWindow):
             )
             self.show_codex_logs()
             return
-        if node in {"local_proxy", "clash_node", "openai"}:
+        if node in {"local_proxy", "vscode_server", "clash_node", "openai"}:
             answer = QMessageBox.question(
                 self, "代理修复建议",
                 f"首个故障点是“{HEALTH_NODE_LABELS[node]}”。\n"

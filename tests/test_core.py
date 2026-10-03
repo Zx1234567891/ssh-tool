@@ -24,8 +24,17 @@ from ssh_tunnel_manager.ssh_config import (
 )
 from ssh_tunnel_manager.store import StateStore, UnsupportedConfigVersion
 from ssh_tunnel_manager.tunnel import TunnelManager, TunnelState
-from ssh_tunnel_manager.updater import UpdateInfo, check_for_update, download_update
-from ssh_tunnel_manager.vscode_bridge import build_extension_vsix, update_proxy_map
+from ssh_tunnel_manager.updater import (
+    UpdateInfo,
+    check_for_update,
+    download_update,
+    installer_upgrade_command,
+)
+from ssh_tunnel_manager.vscode_bridge import (
+    build_extension_vsix,
+    ensure_remote_ssh_download_proxy,
+    update_proxy_map,
+)
 
 
 class ModelTests(unittest.TestCase):
@@ -201,6 +210,31 @@ class VsCodeBridgeTests(unittest.TestCase):
             self.assertIn("extension/package.json", names)
             self.assertIn("extension/extension.js", names)
 
+    def test_remote_ssh_download_proxy_updates_vscode_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Path(folder) / "Code" / "User" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                json.dumps({
+                    "remote.SSH.remotePlatform": {"server-a": "linux"},
+                    "remote.SSH.httpProxy": {"server-b": "http://old-proxy:8080"},
+                }),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"APPDATA": folder}):
+                ok, detail = ensure_remote_ssh_download_proxy(
+                    Path("Code.exe"), "http://127.0.0.1:7897"
+                )
+            payload = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertTrue(ok, detail)
+            self.assertEqual(
+                payload["remote.SSH.httpProxy"]["server-b"],
+                "http://old-proxy:8080",
+            )
+            self.assertEqual(payload["remote.SSH.httpProxy"]["*"], "http://127.0.0.1:7897")
+            self.assertEqual(payload["remote.SSH.httpsProxy"]["*"], "http://127.0.0.1:7897")
+            self.assertEqual(payload["remote.SSH.localServerDownload"], "always")
+
 
 class TunnelCommandTests(unittest.TestCase):
     def test_dedicated_forward_contains_required_options(self) -> None:
@@ -259,6 +293,19 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("200 Connection established", result.detail)
 
+    def test_vscode_server_download_rejects_connect_without_http_response(self) -> None:
+        state = AppState()
+        actions = HostActions(lambda: state.settings)
+        connected_only = subprocess.CompletedProcess(
+            args=[], returncode=35,
+            stdout="HTTP/1.1 200 Connection established\n",
+            stderr="curl: (35) TLS connection failed",
+        )
+        with patch.object(actions, "_run", return_value=connected_only):
+            result = actions.test_vscode_server_download()
+        self.assertFalse(result.ok)
+        self.assertIn("CONNECT", result.detail)
+
     def test_vscode_launch_reuses_default_profile_and_only_syncs_local_map(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             fake_code = Path(folder) / "Code.exe"
@@ -273,15 +320,22 @@ class ActionTests(unittest.TestCase):
                 patch.object(actions, "configure_vscode_environment") as configure_environment,
                 patch.object(actions, "configure_local_ssh_proxy") as configure_ssh,
                 patch("ssh_tunnel_manager.actions.ensure_extension_installed", return_value=(True, "OK")),
+                patch(
+                    "ssh_tunnel_manager.actions.ensure_remote_ssh_download_proxy",
+                    return_value=(True, "OK"),
+                ) as configure_download_proxy,
                 patch("ssh_tunnel_manager.actions.subprocess.Popen") as popen,
             ):
                 actions.launch_vscode(host)
             command = popen.call_args.args[0]
+            environment = popen.call_args.kwargs["env"]
             self.assertEqual(command[0], str(fake_code))
             self.assertNotIn("--user-data-dir", command)
             self.assertIn("--new-window", command)
             self.assertEqual(command[-3:], ["--remote", "ssh-remote+server-a", "/workspace"])
+            self.assertEqual(environment["HTTP_PROXY"], "http://127.0.0.1:7892")
             configure_environment.assert_called_once_with(host)
+            configure_download_proxy.assert_called_once_with(fake_code, "http://127.0.0.1:7892")
             configure_ssh.assert_not_called()
 
     def test_remote_shell_installs_selector_without_fixed_port(self) -> None:
@@ -380,11 +434,14 @@ class ObservabilityTests(unittest.TestCase):
             patch.object(actions, "test_remote_port", return_value=type("R", (), {
                 "ok": True, "title": "远程端口正常", "detail": "ok"
             })()),
+            patch.object(actions, "test_vscode_server_download") as vscode_server,
             patch.object(actions, "test_openai_chain") as openai,
         ):
             snapshot = service.run_full(host, "connected")
         self.assertEqual(snapshot.nodes["local_proxy"].state, HealthState.FAILED)
+        self.assertEqual(snapshot.nodes["vscode_server"].state, HealthState.UNKNOWN)
         self.assertEqual(snapshot.nodes["openai"].state, HealthState.UNKNOWN)
+        vscode_server.assert_not_called()
         openai.assert_not_called()
 
     def test_diagnostic_bundle_redacts_clash_secret(self) -> None:
@@ -432,6 +489,13 @@ class UpdateTests(unittest.TestCase):
         ):
             path = download_update(info, Path(folder))
             self.assertEqual(path.read_bytes(), content)
+
+    def test_installer_upgrade_command_closes_old_app_without_restart(self) -> None:
+        command = installer_upgrade_command(Path(r"C:\Updates\SshTunnelManager-Setup.exe"))
+        self.assertEqual(command[0], r"C:\Updates\SshTunnelManager-Setup.exe")
+        self.assertIn("/CLOSEAPPLICATIONS", command)
+        self.assertIn("/NORESTART", command)
+        self.assertIn("/SUPPRESSMSGBOXES", command)
 
 
 if __name__ == "__main__":
